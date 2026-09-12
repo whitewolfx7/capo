@@ -142,9 +142,12 @@ describe('acceptance: limit-triggered switch from Claude to Codex', () => {
     await orch.start();
 
     expect(claude.started.map((s) => s.sessionId).sort()).toEqual(['root', 'team-a', 'team-b']);
-    expect(claude.started.find((s) => s.sessionId === 'root')!.model).toBe('opus');
-    expect(claude.started.find((s) => s.sessionId === 'team-a')!.model).toBe('sonnet');
-    expect(claude.started.find((s) => s.sessionId === 'team-b')!.model).toBe('sonnet');
+    expect(claude.started.find((s) => s.sessionId === 'root')!.model)
+      .toBe(config.models.root['claude']);
+    expect(claude.started.find((s) => s.sessionId === 'team-a')!.model)
+      .toBe(config.models.coordinator['claude']);
+    expect(claude.started.find((s) => s.sessionId === 'team-b')!.model)
+      .toBe(config.models.coordinator['claude']);
 
     // --- Step 3: a usage-limit event arrives from team-a mid-run ---
     claude.emit('team-a', {
@@ -173,9 +176,18 @@ describe('acceptance: limit-triggered switch from Claude to Codex', () => {
 
     // --- Step 5: all three sessions restart on codex, codex model column ---
     expect(codex.started.map((s) => s.sessionId).sort()).toEqual(['root', 'team-a', 'team-b']);
-    expect(codex.started.find((s) => s.sessionId === 'root')!.model).toBe('gpt-5-codex');
-    expect(codex.started.find((s) => s.sessionId === 'team-a')!.model).toBe('gpt-5-codex-mini');
-    expect(codex.started.find((s) => s.sessionId === 'team-b')!.model).toBe('gpt-5-codex-mini');
+    // Derived from the config rather than pinned to a literal: what matters
+    // is that the CODEX column was used, not which model name is in it. Real
+    // Codex model names differ per account, so the example carries
+    // placeholders.
+    expect(codex.started.find((s) => s.sessionId === 'root')!.model)
+      .toBe(config.models.root['codex']);
+    expect(codex.started.find((s) => s.sessionId === 'team-a')!.model)
+      .toBe(config.models.coordinator['codex']);
+    expect(codex.started.find((s) => s.sessionId === 'team-b')!.model)
+      .toBe(config.models.coordinator['codex']);
+    // And that it is genuinely a different column from the one it started on.
+    expect(config.models.root['codex']).not.toBe(config.models.root['claude']);
     expect(state.get().activePlatform).toBe('codex');
 
     // Each relaunched session's prompt carries only its own checkpoint.

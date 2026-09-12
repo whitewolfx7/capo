@@ -16,8 +16,11 @@
  *                                event, then either:
  *                                  - a rate-limit-shaped `error` event, if
  *                                    the prompt contains __EMIT_LIMIT__, or
- *                                  - an `agent_message` followed by a
- *                                    `task_complete` event otherwise.
+ *                                  - an agent_message item followed by
+ *                                    turn.completed otherwise.
+ *
+ * Event shapes match a real capture of codex-cli 0.147.0; see
+ * codex-real-stream.jsonl in this directory.
  *                                Exits 0 either way.
  *
  * Handles both invocation shapes CodexAdapter uses:
@@ -42,32 +45,47 @@ const sessionId = isResume ? argv[2] : `stub-session-${randomUUID()}`;
 // positional argument.
 const prompt = argv[argv.length - 1] ?? '';
 
-function emit(msg) {
-  process.stdout.write(`${JSON.stringify({ id: String(Math.random()), msg })}\n`);
+/**
+ * Emits one event exactly as the real `codex exec --json` does: a flat
+ * top-level object, NOT wrapped in an app-server {id, msg} envelope. Verified
+ * against a real capture; see codex-real-stream.jsonl.
+ */
+function emit(event) {
+  process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
 // First line: the stub's own argv, so the test can assert on the exact
 // command line CodexAdapter built, without spawning the real binary.
 process.stdout.write(`${JSON.stringify(argv)}\n`);
 
-emit({ type: 'session_configured', session_id: sessionId, model: 'stub-model' });
+// The real stream opens with thread.started carrying thread_id. This is the
+// event that makes a session ready; without it start() never resolves.
+emit({ type: 'thread.started', thread_id: sessionId });
+
+// Real runs emit warning-shaped error items before the turn (a clamped hook
+// timeout, a model metadata miss). They must not kill the session.
+emit({
+  type: 'item.completed',
+  item: { id: 'item_0', type: 'error', message: 'clamping SessionEnd hook timeout to 3s' },
+});
+
+emit({ type: 'turn.started' });
 
 if (prompt.includes('__EMIT_LIMIT__')) {
-  // Best-effort guess at a Codex-shaped rate-limit event: the exact wire
-  // shape codex-cli 0.147.0 uses for a limit was not part of the verified
-  // CLI surface (only the exec/resume command line was), so this is an
-  // `error`-typed event whose message CodexAdapter pattern-matches on
-  // "usage limit", mirroring how the Claude Code adapter is described to
-  // recognize its own limit text.
   emit({
     type: 'error',
     message: 'You have hit your usage limit. Try again at 2026-09-12T18:00:00Z.',
-    code: 'usage_limit_reached',
+  });
+  emit({
+    type: 'turn.failed',
+    error: { message: 'You have hit your usage limit. Try again at 2026-09-12T18:00:00Z.' },
   });
 } else {
-  const reply = `stub reply to: ${prompt}`;
-  emit({ type: 'agent_message', message: reply });
-  emit({ type: 'task_complete', last_agent_message: reply });
+  emit({
+    type: 'item.completed',
+    item: { id: 'item_1', type: 'agent_message', text: `stub reply to: ${prompt}` },
+  });
+  emit({ type: 'turn.completed' });
 }
 
 process.exit(0);

@@ -80,13 +80,13 @@ start_on: claude
 models:            # role -> platform -> model (names illustrative; use each CLI's real IDs)
   root:
     claude: opus
-    codex: gpt-5-codex
+    codex: <your codex model>
   coordinator:
     claude: sonnet
-    codex: gpt-5-codex-mini
+    codex: <your codex model>
   worker:
     claude: haiku
-    codex: gpt-5-codex-mini
+    codex: <your codex model>
 
 roles:
   root: ./roles/root.md

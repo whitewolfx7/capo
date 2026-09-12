@@ -74,9 +74,12 @@ platforms:
 start_on: claude
 
 models:            # role -> platform -> model, using each CLI's own model names
-  root:        { claude: opus,   codex: gpt-5-codex }
-  coordinator: { claude: sonnet, codex: gpt-5-codex }
-  worker:      { claude: haiku,  codex: gpt-5-codex }
+                   # Check `codex` model names against YOUR account: some are
+                   # rejected for ChatGPT-account users, and some need a newer
+                   # CLI than you have. `codex exec -m <model> "hi"` tells you.
+  root:        { claude: opus,   codex: <your codex model> }
+  coordinator: { claude: sonnet, codex: <your codex model> }
+  worker:      { claude: haiku,  codex: <your codex model> }
 
 roles:
   root: ./roles/root.md

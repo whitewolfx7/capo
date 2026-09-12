@@ -315,14 +315,41 @@ class CodexAdapterSession implements AdapterSession {
     }
   }
 
+  /**
+   * Maps one line of `codex exec --json` onto CAPO's adapter events.
+   *
+   * The schema here is taken from a REAL capture of codex-cli 0.147.0, kept
+   * at `__fixtures__/codex-real-stream.jsonl`. An earlier version of this
+   * mapper guessed at `session_configured` / `agent_message` /
+   * `task_complete`, none of which exist. The consequence was not a missing
+   * feature but a hang: without a `ready` event, `start()` never resolves and
+   * a run never begins.
+   *
+   * The real envelope is:
+   *   {"type":"thread.started","thread_id":"..."}
+   *   {"type":"turn.started"}
+   *   {"type":"item.completed","item":{"id":"...","type":"...", ...}}
+   *   {"type":"turn.completed"} | {"type":"turn.failed","error":{"message":"..."}}
+   *   {"type":"error","message":"..."}
+   *
+   * `item.type` values beyond "error" are still inferred: a successful turn
+   * has not been captured, so assistant text and tool calls are matched
+   * permissively rather than pinned to exact names.
+   */
   private mapEvent(value: unknown, onReady?: () => void): AdapterEvent[] {
     const record = extractMsg(value);
     if (!record) return [];
     const type = typeof record.type === 'string' ? record.type : undefined;
 
     switch (type) {
-      case 'session_configured': {
-        const sid = typeof record.session_id === 'string' ? record.session_id : undefined;
+      // The session id. Without this the session never becomes ready.
+      case 'thread.started': {
+        const sid =
+          typeof record.thread_id === 'string'
+            ? record.thread_id
+            : typeof record.session_id === 'string'
+              ? record.session_id
+              : undefined;
         if (sid && !this.platformSessionId) {
           this.platformSessionId = sid;
           onReady?.();
@@ -331,48 +358,29 @@ class CodexAdapterSession implements AdapterSession {
         return [];
       }
 
-      case 'agent_message': {
-        const text = typeof record.message === 'string' ? record.message : '';
-        return [{ kind: 'text', text }];
-      }
+      case 'turn.started':
+        return [];
 
-      case 'exec_command_begin':
-      case 'mcp_tool_call_begin':
-      case 'patch_apply_begin': {
-        const name =
-          typeof record.command === 'string'
-            ? record.command
-            : typeof record.tool === 'string'
-              ? record.tool
-              : type;
-        return [{ kind: 'tool', name }];
-      }
+      case 'item.completed':
+        return this.mapItem(record.item);
 
-      case 'task_complete':
+      case 'turn.completed':
         return [{ kind: 'turn-end' }];
 
-      case 'usage_limit_reached': {
-        const raw = typeof record.message === 'string' ? record.message : 'codex usage limit reached';
-        // Never forward reset_at unvalidated. `resetAt` is contractually an
-        // ISO timestamp the orchestrator compares against now; a human string
-        // there parses to Invalid Date, makes a capped platform look
-        // available, and flaps the run between platforms. Codex's exact wire
-        // shape here is unverified, so accept an ISO value, try to parse a
-        // human one, and otherwise report no reset time at all.
-        const resetAt = normalizeResetAt(record.reset_at, raw);
-        return resetAt !== undefined ? [{ kind: 'usage-limit', resetAt, raw }] : [{ kind: 'usage-limit', raw }];
+      case 'turn.failed': {
+        const message = errorMessageOf(record.error) ?? 'codex turn failed';
+        if (isUsageLimit(message)) return [usageLimitEvent(message)];
+        // A failed turn is still a finished turn: the session stays alive and
+        // the next send() starts a new one.
+        return [
+          { kind: 'error', message, retryable: false },
+          { kind: 'turn-end' },
+        ];
       }
 
       case 'error': {
         const message = typeof record.message === 'string' ? record.message : 'codex error';
-        // codex-cli 0.147.0's exact wire shape for a hit rate limit was not
-        // part of the verified CLI surface (only the exec/resume command
-        // line was verified) — pattern-match on the message the same way
-        // the Claude Code adapter is described to, rather than assume a
-        // dedicated event type exists.
-        if (/usage limit/i.test(message)) {
-          return [{ kind: 'usage-limit', raw: message }];
-        }
+        if (isUsageLimit(message)) return [usageLimitEvent(message)];
         return [{ kind: 'error', message, retryable: false }];
       }
 
@@ -380,6 +388,45 @@ class CodexAdapterSession implements AdapterSession {
         return [];
     }
   }
+
+  /** One `item.completed` payload. Item types other than "error" are inferred. */
+  private mapItem(item: unknown): AdapterEvent[] {
+    if (typeof item !== 'object' || item === null) return [];
+    const rec = item as Record<string, unknown>;
+    const itemType = typeof rec.type === 'string' ? rec.type : '';
+    const message = typeof rec.message === 'string' ? rec.message : undefined;
+    const text = typeof rec.text === 'string' ? rec.text : undefined;
+
+    if (itemType === 'error') {
+      const body = message ?? 'codex reported an error';
+      if (isUsageLimit(body)) return [usageLimitEvent(body)];
+      // Codex emits warnings as error items (a hook timeout being clamped, a
+      // model metadata miss). Those are not failures and must not be treated
+      // as such, so they surface as retryable rather than killing a session.
+      return [{ kind: 'error', message: body, retryable: true }];
+    }
+
+    // Assistant prose. Matched permissively because the exact item type for a
+    // successful turn has not been captured.
+    if (/message|agent|assistant|text/i.test(itemType)) {
+      const body = text ?? message;
+      return body === undefined ? [] : [{ kind: 'text', text: body }];
+    }
+
+    // Anything with a command or tool shape is reported as tool activity.
+    if (/command|exec|tool|patch|file/i.test(itemType)) {
+      const name =
+        typeof rec.command === 'string'
+          ? rec.command
+          : typeof rec.name === 'string'
+            ? rec.name
+            : itemType;
+      return [{ kind: 'tool', name }];
+    }
+
+    return [];
+  }
+
 }
 
 export class CodexAdapter implements PlatformAdapter {
@@ -437,4 +484,30 @@ function normalizeResetAt(field: unknown, message: string): string | undefined {
     if (parsed !== undefined) return parsed;
   }
   return parseResetAt(message);
+}
+
+/** Pulls a message out of the several error shapes codex uses. */
+function errorMessageOf(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object' && value !== null) {
+    const m = (value as Record<string, unknown>).message;
+    if (typeof m === 'string') return m;
+  }
+  return undefined;
+}
+
+function isUsageLimit(message: string): boolean {
+  return /usage limit|rate limit|quota exceeded|too many requests/i.test(message);
+}
+
+/**
+ * A usage limit event with a validated reset time, or none at all.
+ *
+ * `resetAt` is contractually an ISO timestamp the orchestrator compares
+ * against now. A human string there parses to Invalid Date, which makes a
+ * capped platform look available and flaps the run between platforms.
+ */
+function usageLimitEvent(raw: string): AdapterEvent {
+  const resetAt = normalizeResetAt(undefined, raw);
+  return resetAt !== undefined ? { kind: 'usage-limit', resetAt, raw } : { kind: 'usage-limit', raw };
 }

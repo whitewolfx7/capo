@@ -272,7 +272,14 @@ describe('acceptance: limit-triggered switch from Claude to Codex', () => {
         ['component-a', subA],
         ['component-b', subB],
       ]),
-      checkCommand: ['node', '--test', 'src/**/*.test.mjs'],
+      // Explicit paths, not a glob: `node --test 'src/**/*.test.mjs'` only
+      // expands globs from Node 22, and package.json declares Node 20 as the
+      // floor. CI on Node 20 found this; it passed locally on Node 23.
+      checkCommand: [
+        'node', '--test',
+        'src/component-a/add.test.mjs',
+        'src/component-b/multiply.test.mjs',
+      ],
       identity: IDENTITY,
     });
 

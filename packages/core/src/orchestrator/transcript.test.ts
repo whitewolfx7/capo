@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import {
@@ -88,8 +88,12 @@ describe('appendTranscript', () => {
   });
 
   it('never throws, so a transcript cannot fail a run', async () => {
-    // An unwritable location is the realistic case; the run must not care.
-    await expect(appendTranscript('/proc/nonexistent/nope', 'x', 'y')).resolves.toBeUndefined();
+    // A directory path that is actually a regular file fails with ENOTDIR on
+    // every platform, immediately. An earlier version used /proc, which is
+    // Linux-only and made recursive mkdir hang until the test timed out.
+    const blocker = join(dir, 'not-a-directory');
+    await writeFile(blocker, 'this is a file, not a directory\n');
+    await expect(appendTranscript(blocker, 'x', 'y')).resolves.toBeUndefined();
   });
 
   it('cannot be made to write outside the run directory by a session id', () => {

@@ -147,10 +147,14 @@ it is the feature the whole product exists for.
 ## Model names
 
 `gpt-5.6` is not a model. The real ones are listed in
-`~/.codex/models_cache.json`. On this account: `gpt-6-astra` (needs a newer CLI
-than 0.147.0), `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
-`gpt-5.3-codex-spark`. `gpt-5.6-sol` works. `gpt-5-codex` does not exist for a
-ChatGPT account.
+`~/.codex/models_cache.json`. On this account: `gpt-6-astra`, `gpt-5.6-sol`,
+`gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.3-codex-spark`.
+`gpt-5-codex` does not exist for a ChatGPT account.
+
+Verified working on **codex-cli 0.154.0**: `gpt-6-astra` and `gpt-5.6-sol`.
+On 0.147.0, `gpt-6-astra` was rejected with "requires a newer version of
+Codex", so a CLI upgrade fixed it. The event schema is unchanged between
+0.147.0 and 0.154.0, so the captured fixtures remain accurate.
 
 ## The lesson
 

@@ -74,9 +74,11 @@ platforms:
 start_on: claude
 
 models:            # role -> platform -> model, using each CLI's own model names
-                   # Check `codex` model names against YOUR account: some are
-                   # rejected for ChatGPT-account users, and some need a newer
-                   # CLI than you have. `codex exec -m <model> "hi"` tells you.
+                   # Codex model names are account- and CLI-version specific.
+                   # The real list for your account is in
+                   # ~/.codex/models_cache.json. Verified working on
+                   # codex-cli 0.154.0: gpt-6-astra, gpt-5.6-sol.
+                   # `codex exec -m <model> "hi"` settles any doubt.
   root:        { claude: opus,   codex: <your codex model> }
   coordinator: { claude: sonnet, codex: <your codex model> }
   worker:      { claude: haiku,  codex: <your codex model> }

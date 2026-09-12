@@ -75,9 +75,14 @@ claude plugin marketplace remove capo
 Neither touches your project's `.capo/` directory or stops a running
 orchestrator. Stop a run explicitly before uninstalling if you want it stopped.
 
-## Not yet verified
+## Verified
 
-These commands match the `claude plugin` surface on Claude Code 2.1.236 and the
-manifest passes `claude plugin validate`. A full install from a clean machine
-has not been performed. If `marketplace add` rejects the repository, check that
-`.claude-plugin/marketplace.json` exists at the repository root.
+Both commands above were run for real on Claude Code 2.1.236 and succeeded:
+
+```
+✔ Successfully added marketplace: capo (declared in user settings)
+✔ Successfully installed plugin: capo@capo (scope: user)
+```
+
+The manifest also passes `claude plugin validate`. Not yet confirmed from a
+clean machine, only from this one.

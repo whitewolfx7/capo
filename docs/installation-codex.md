@@ -75,19 +75,29 @@ codex plugin marketplace remove capo
 Neither touches your project's `.capo/` directory or stops a running
 orchestrator.
 
-## Not yet verified
+## Verified
 
-The plugin layout, the manifest fields, the `"skills": "./skills/"`
-registration, and the marketplace format were all confirmed by inspecting real
-installed Codex plugins on a machine running codex-cli 0.147.0. See
-[notes/codex-plugin-layout.md](notes/codex-plugin-layout.md).
+Both commands above were run for real on codex-cli 0.154.0 and succeeded:
 
-Two things remain unconfirmed because they need a real install:
+```
+Added marketplace `capo` from /path/to/CAPO.
+Added plugin `capo` from marketplace `capo`.
+```
 
-- The `policy.authentication` value for a plugin needing no authentication.
-  CAPO declares one; if `codex plugin add` rejects it, compare against a
-  bundled plugin's marketplace entry.
-- Whether `${CLAUDE_PLUGIN_ROOT}` is substituted inside a Codex skill body.
-  Codex accepts it as an alias and shipping plugins use it, but if the path
-  does not resolve, the skill also documents a relative fallback of
-  `../../dist/capo.mjs` from the skill file.
+`codex plugin list` then reports `capo@capo  installed, enabled  0.1.0`, and the
+installed bundle runs from its own cache directory:
+
+```bash
+node ~/.codex/plugins/cache/capo/capo/0.1.0/dist/capo.mjs doctor
+```
+
+One thing this install corrected: `policy.authentication` in the marketplace
+file accepts only `ON_INSTALL` or `ON_USE`. An earlier `NONE` was rejected
+outright with `unknown variant`. CAPO uses `ON_USE`, which is the honest value:
+CAPO has no credentials of its own and relies on whatever login the platform
+CLIs already have, so there is nothing to do at install time.
+
+Still unconfirmed: whether `${CLAUDE_PLUGIN_ROOT}` is substituted inside a
+Codex skill body. Codex accepts it as an alias and shipping plugins use it, but
+if the path does not resolve, the skill also documents a relative fallback of
+`../../dist/capo.mjs` from the skill file.

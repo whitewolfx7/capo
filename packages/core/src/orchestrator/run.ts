@@ -264,7 +264,7 @@ export class Orchestrator {
     await Promise.all(
       entries.map(async ([sessionId, live]) => {
         const cp = await this.#requestCheckpoint(sessionId, live, reason);
-        results.set(sessionId, cp);
+        results.set(sessionId, this.#stampCheckpoint(sessionId, live, cp));
       }),
     );
 
@@ -285,6 +285,32 @@ export class Orchestrator {
     for (const [sessionId] of entries) this.#live.delete(sessionId);
 
     return results;
+  }
+
+  /**
+   * Replaces a checkpoint's metadata with what CAPO already knows.
+   *
+   * A live Codex agent, asked for a checkpoint, returned a perfectly
+   * well-formed block with every header field blank: run, role, platform,
+   * written and base_commit were all empty. That is not misbehaviour. A
+   * session has no reliable way to know its run id or the base commit, and
+   * asking it to restate them invites a confident wrong answer.
+   *
+   * So the division is: the session supplies the narrative, which only it
+   * knows, and CAPO supplies the facts, which only CAPO knows. Anything the
+   * session says about identity is discarded rather than trusted.
+   */
+  #stampCheckpoint(sessionId: SessionId, live: LiveSession, cp: Checkpoint): Checkpoint {
+    const state = this.#state.get();
+    return {
+      ...cp,
+      sessionId,
+      runId: state.runId,
+      role: live.role,
+      platform: live.platform,
+      written: new Date().toISOString(),
+      baseCommit: state.baseCommit,
+    };
   }
 
   #requestCheckpoint(sessionId: SessionId, live: LiveSession, reason: PauseReason): Promise<Checkpoint> {

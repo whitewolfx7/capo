@@ -95,7 +95,7 @@ function withDeadline<T>(promise: Promise<T>, label: string, ms = 5000): Promise
   ]);
 }
 
-async function harness(): Promise<{
+async function harness(makeAdapter: (id: string) => FakeAdapter = (id) => new ArmedFakeAdapter(id)): Promise<{
   orch: Orchestrator;
   claude: FakeAdapter;
   codex: FakeAdapter;
@@ -132,8 +132,8 @@ async function harness(): Promise<{
   await writeFile(configPath, CONFIG_YAML);
   const config = await loadConfig(configPath);
 
-  const claude = new ArmedFakeAdapter('claude');
-  const codex = new ArmedFakeAdapter('codex');
+  const claude = makeAdapter('claude');
+  const codex = makeAdapter('codex');
 
   const runDirPath = runDir(workspace, 'test-run');
   const state = await StateStore.create(runDirPath, {
@@ -412,5 +412,57 @@ describe('worktree branch naming', () => {
     for (const br of [...branchesA, ...branchesB]) {
       expect(br).toMatch(/^capo\/[^/]+\/[^/]+$/);
     }
+  });
+});
+
+describe('checkpoint metadata is CAPO\'s, not the session\'s', () => {
+  /**
+   * A live Codex agent returned a well-formed checkpoint with every header
+   * field blank: run, role, platform, written and base_commit all empty. A
+   * session has no reliable way to know its run id or the base commit, and
+   * asking it to restate them invites a confident wrong answer. CAPO stamps
+   * them instead, and discards whatever the session claimed.
+   */
+  class LyingAdapter extends FakeAdapter {
+    override async start(opts: StartSessionOptions): Promise<AdapterSession> {
+      const session = await super.start(opts);
+      this.replyWithCheckpoint(opts.sessionId, {
+        sessionId: 'not-me',
+        runId: '',
+        role: 'worker',
+        platform: 'some-other-platform',
+        written: '',
+        baseCommit: '',
+        objective: `real narrative for ${opts.sessionId}`,
+        decisions: ['a decision the session actually made'],
+        done: [], inProgress: [], remaining: [], blockers: [],
+      });
+      return session;
+    }
+  }
+
+  it('overwrites blank or wrong metadata while keeping the narrative', async () => {
+    const { orch, claude, state, dir, config } = await harness(
+      (id) => new LyingAdapter(id),
+    );
+    await orch.start();
+    claude.emit('root', { kind: 'usage-limit', raw: 'limit' });
+    await once(orch.events, 'switched');
+
+    const set = (await latestCheckpointSet(dir))!;
+    for (const cp of set.checkpoints) {
+      expect(cp.runId, 'run id').toBe(state.get().runId);
+      expect(cp.baseCommit, 'base commit').toBe(state.get().baseCommit);
+      expect(cp.baseCommit).not.toBe('');
+      expect(cp.written).not.toBe('');
+      expect(cp.sessionId).not.toBe('not-me');
+      expect(cp.platform).toBe('claude');
+      // The narrative, which only the session knows, survives untouched.
+      expect(cp.objective).toContain('real narrative');
+      expect(cp.decisions).toEqual(['a decision the session actually made']);
+    }
+    const root = set.checkpoints.find((c) => c.sessionId === 'root');
+    expect(root?.role, 'role comes from CAPO, not the session').toBe('root');
+    expect(config).toBeDefined();
   });
 });

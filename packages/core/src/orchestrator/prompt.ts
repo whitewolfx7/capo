@@ -76,7 +76,22 @@ export function buildSystemPrompt(input: BuildSystemPromptInput): string {
   sections.push(`## Your ownership\n${renderOwnership(config, role, sessionId)}`);
 
   if (checkpoint) {
-    sections.push(`## Your checkpoint from the previous platform\n${renderCheckpoint(checkpoint)}`);
+    // Fenced, not inlined. The checkpoint carries its own `##` headings, and
+    // bare they collide with this prompt's section structure: the reader sees
+    // "## Objective" twice meaning two different things, and the checkpoint's
+    // sections merge visually into the prompt's. A fence makes the boundary
+    // unambiguous, and matches the shape the session was asked to produce.
+    sections.push(
+      [
+        '## Your checkpoint from the previous platform',
+        'This is where you left off. Continue from it. You are on a different',
+        'platform now and have no memory of the previous session beyond this.',
+        '',
+        '```markdown',
+        renderCheckpoint(checkpoint).trimEnd(),
+        '```',
+      ].join('\n'),
+    );
   }
 
   return sections.join('\n\n');

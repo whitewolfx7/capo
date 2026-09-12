@@ -12,7 +12,7 @@
 CAPO is not published to a public marketplace yet, so install from a clone.
 
 ```bash
-git clone <your fork of this repo> && cd CAPO
+git clone https://github.com/whitewolfx7/capo.git && cd capo
 npm install
 npm run build
 npm run build:plugins
@@ -27,7 +27,7 @@ Codex installs plugins from a marketplace, and this repository is one. From any
 directory:
 
 ```bash
-codex plugin marketplace add /absolute/path/to/CAPO
+codex plugin marketplace add /absolute/path/to/capo
 codex plugin add capo@capo
 ```
 
@@ -38,7 +38,14 @@ codex plugin list
 ```
 
 `marketplace add` also accepts `owner/repo`, an HTTPS git URL, or an SSH git
-URL, so once this repository is public you can add it directly without cloning.
+URL, so you can skip the clone entirely:
+
+```bash
+codex plugin marketplace add whitewolfx7/capo
+codex plugin add capo@capo
+```
+
+That path has not been tested yet; the local-clone route above has.
 
 ## Check it works
 

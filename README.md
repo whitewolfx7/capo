@@ -32,7 +32,7 @@ read, edit, and paste into a chat window by hand.
 ## Quickstart
 
 ```bash
-git clone <your fork of this repo> && cd CAPO
+git clone https://github.com/whitewolfx7/capo.git && cd capo
 npm install && npm run build
 node packages/cli/dist/main.js doctor
 ```

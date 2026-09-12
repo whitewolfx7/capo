@@ -12,7 +12,7 @@
 CAPO is not published to a public marketplace yet, so install from a clone.
 
 ```bash
-git clone <your fork of this repo> && cd CAPO
+git clone https://github.com/whitewolfx7/capo.git && cd capo
 npm install
 npm run build
 npm run build:plugins
@@ -27,7 +27,7 @@ and does not depend on a global install.
 The repository is its own marketplace. From any directory:
 
 ```bash
-claude plugin marketplace add /absolute/path/to/CAPO
+claude plugin marketplace add /absolute/path/to/capo
 claude plugin install capo@capo
 ```
 
@@ -35,7 +35,7 @@ Restart or reload Claude Code if it asks you to. Then check the plugin is
 there:
 
 ```bash
-claude plugin validate /absolute/path/to/CAPO/plugins/claude/capo
+claude plugin validate /absolute/path/to/capo/plugins/claude/capo
 ```
 
 ## Check it works

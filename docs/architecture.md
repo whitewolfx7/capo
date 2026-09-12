@@ -140,8 +140,11 @@ base_commit: 3f2a9c1
 ```
 
 The root's checkpoint also carries the task table: each task, its coordinator,
-state, and write scope. A `CHECKPOINT.md` index at the run level lists every
-session file and the reason for the pause (limit, user, both-capped).
+state, and write scope, rendered as a fenced JSON block so it round-trips
+exactly. Each pause writes a numbered set directory containing one file per
+session plus an `INDEX.md` naming the reason for the pause (usage-limit,
+user-switch, both-capped, stop), the platform the sessions were running on, and
+every session file in the set.
 
 Rules:
 

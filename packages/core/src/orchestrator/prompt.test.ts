@@ -10,6 +10,7 @@ let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'capo-prompt-'));
   await writeFile(join(dir, 'GOAL.md'), 'Ship the thing.\n');
+  await writeFile(join(dir, 'w.md'), 'Do one bounded piece of work.\n');
 });
 afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
@@ -23,7 +24,7 @@ const config = (): CapoConfig => ({
     coordinator: { claude: 'sonnet', codex: 'gpt-5-codex' },
     worker: { claude: 'haiku', codex: 'gpt-5-codex' },
   },
-  roles: { root: 'r.md', coordinator: 'c.md', worker: 'w.md' },
+  roles: { root: 'r.md', coordinator: 'c.md', worker: join(dir, 'w.md') },
   context: [],
   coordinators: [{ id: 'team-a' }],
   tasks: [{ id: 'a', coordinator: 'team-a', brief: 'a.md', writeScope: ['src/a/'] }],
@@ -89,5 +90,46 @@ describe('buildSystemPrompt', () => {
     const out = build();
     expect(out).toContain('team-a');
     expect(out).toContain('src/a/');
+  });
+});
+
+describe('buildSystemPrompt worker delegation', () => {
+  it('gives a coordinator the worker role instructions and the platform-specific worker model', () => {
+    const out = buildSystemPrompt({
+      config: config(), role: 'coordinator', sessionId: 'team-a', platform: 'claude',
+      contextFiles: [], roleInstructions: 'Own one component.',
+    });
+    expect(out).toContain('## Delegating to workers');
+    expect(out).toContain('Do one bounded piece of work.');
+    expect(out).toContain('"haiku"');
+    // The other platform's worker model must not leak in.
+    expect(out).not.toContain('gpt-5-codex');
+    // Honest about the limits of what CAPO can do here.
+    expect(out).toMatch(/cannot enforce/i);
+  });
+
+  it('picks the worker model for whichever platform is passed in', () => {
+    const out = buildSystemPrompt({
+      config: config(), role: 'coordinator', sessionId: 'team-a', platform: 'codex',
+      contextFiles: [], roleInstructions: 'Own one component.',
+    });
+    expect(out).toContain('"gpt-5-codex"');
+    expect(out).not.toContain('"haiku"');
+  });
+
+  it('omits the section when no platform is given, for backward compatibility with existing callers', () => {
+    const out = buildSystemPrompt({
+      config: config(), role: 'coordinator', sessionId: 'team-a',
+      contextFiles: [], roleInstructions: 'Own one component.',
+    });
+    expect(out).not.toContain('## Delegating to workers');
+  });
+
+  it('never gives the root a worker-delegation section, since only coordinators spawn workers', () => {
+    const out = buildSystemPrompt({
+      config: config(), role: 'root', sessionId: 'root', platform: 'claude',
+      contextFiles: [], roleInstructions: 'Own the objective.',
+    });
+    expect(out).not.toContain('## Delegating to workers');
   });
 });

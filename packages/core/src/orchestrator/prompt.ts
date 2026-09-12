@@ -4,7 +4,7 @@
  * session before a platform switch.
  */
 import { readFileSync } from 'node:fs';
-import type { CapoConfig, Checkpoint, RoleName, SessionId } from '../types.js';
+import type { CapoConfig, Checkpoint, PlatformId, RoleName, SessionId } from '../types.js';
 import { renderCheckpoint } from '../checkpoint/render.js';
 
 /**
@@ -48,6 +48,19 @@ export interface BuildSystemPromptInput {
   roleInstructions: string;
   /** Present only when relaunching after a platform switch. */
   checkpoint?: Checkpoint;
+  /**
+   * The platform this session is launching on (a key of `config.platforms`,
+   * e.g. "claude" or "codex").
+   *
+   * Only used to build a coordinator's worker-delegation section: CAPO never
+   * launches a worker itself, so the only way it can act on `config.roles.worker`
+   * and `config.models.worker` at all is by handing them to the coordinator
+   * that will spawn workers, and picking the right entry out of
+   * `config.models.worker` needs to know which platform that is. Optional so
+   * existing callers keep compiling; omitting it (or passing a non-coordinator
+   * role) just skips that one section -- every other section is unaffected.
+   */
+  platform?: PlatformId;
 }
 
 /**
@@ -61,7 +74,7 @@ export interface BuildSystemPromptInput {
  * whatever is passed in as `checkpoint`.
  */
 export function buildSystemPrompt(input: BuildSystemPromptInput): string {
-  const { config, role, sessionId, contextFiles, roleInstructions, checkpoint } = input;
+  const { config, role, sessionId, contextFiles, roleInstructions, checkpoint, platform } = input;
   const sections: string[] = [];
 
   const objectiveBody = readFileSync(config.objective, 'utf8').trim();
@@ -74,6 +87,10 @@ export function buildSystemPrompt(input: BuildSystemPromptInput): string {
   }
 
   sections.push(`## Your ownership\n${renderOwnership(config, role, sessionId)}`);
+
+  if (role === 'coordinator' && platform !== undefined) {
+    sections.push(renderWorkerDelegation(config, platform));
+  }
 
   if (checkpoint) {
     // Fenced, not inlined. The checkpoint carries its own `##` headings, and
@@ -128,6 +145,56 @@ function renderOwnership(config: CapoConfig, role: RoleName, sessionId: SessionI
   );
   lines.push('---');
   lines.push(CHECKPOINT_REQUEST);
+
+  return lines.join('\n');
+}
+
+/**
+ * The one place `config.roles.worker` and `config.models.worker` are ever
+ * read. CAPO does not spawn workers -- a coordinator does, through its
+ * host's native subagent mechanism -- so this is also the only lever CAPO
+ * has on what a worker is told and which model it runs as: brief the
+ * coordinator, and ask it to pass both along when it spawns one.
+ *
+ * Deliberately honest rather than reassuring: CAPO cannot make a platform
+ * honor a model request for a subagent it doesn't launch, so the text says
+ * "ask", not "set" or "use".
+ */
+function renderWorkerDelegation(config: CapoConfig, platform: PlatformId): string {
+  const workerInstructions = readFileSync(config.roles.worker, 'utf8').trim();
+  const workerModel = config.models.worker[platform];
+
+  const lines: string[] = [];
+  lines.push('## Delegating to workers');
+  lines.push(
+    "You spawn workers yourself, using your host's native subagent mechanism " +
+      "(the Agent tool in Claude Code, Codex's own subagent support). CAPO does " +
+      'not spawn workers and has no way to launch or control one directly -- this ' +
+      'section is the only way it can reach a worker at all: by handing you what ' +
+      'a worker should be told and asking you to pass it on.',
+  );
+  lines.push('');
+  lines.push(
+    'Brief every worker you spawn with the role instructions below, adapted to ' +
+      'the specific piece of work you are delegating and to the write scope you ' +
+      'are handing it (a subset of your own, inside your worktree). They describe ' +
+      'what a worker owns, how it should work, and how it reports back to you:',
+  );
+  lines.push('');
+  lines.push('### Worker role instructions');
+  lines.push(workerInstructions);
+
+  if (workerModel !== undefined) {
+    lines.push('');
+    lines.push(
+      `When you spawn a worker, ask your subagent tooling for the "${workerModel}" ` +
+        "model -- that is what this run's config designates for workers on this " +
+        'platform. Treat this as a request, not a guarantee: CAPO does not launch ' +
+        "the worker itself, so it cannot enforce the platform's model choice, only " +
+        'ask for it through you. If your tooling has no way to request a model, or ' +
+        'ignores the request, proceed anyway rather than blocking the work on it.',
+    );
+  }
 
   return lines.join('\n');
 }

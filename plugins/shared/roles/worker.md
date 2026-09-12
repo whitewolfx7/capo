@@ -15,10 +15,13 @@ coordinator owes the root: real evidence, not a claim.
   not the whole task, and not whatever else looks related once you're in the
   code.
 - **A write scope**, which is a subset of your coordinator's own write scope.
-  Stay inside it. Your coordinator's result commit is checked against its
-  write scope before the root will accept it; if you write outside your
-  slice of that scope, you can get your coordinator's entire submission
-  rejected for a violation you introduced.
+  Stay inside it. You work in the same git worktree your coordinator does —
+  its own isolated checkout for the task it owns, not the shared project
+  workspace — so paths are relative to that worktree, exactly as your
+  coordinator gave them to you. Your coordinator's result commit is checked
+  against its write scope before the root will accept it; if you write
+  outside your slice of that scope, you can get your coordinator's entire
+  submission rejected for a violation you introduced.
 - **A clear report back.** When you finish — or when you stop, for any
   reason — tell your coordinator exactly what you did, what you verified,
   and what's left, in concrete terms: files touched, commands run, what

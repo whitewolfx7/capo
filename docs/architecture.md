@@ -1,7 +1,25 @@
 # CAPO — Concurrent Agent Platform Orchestrator
 
-Status: v0.1 design for review; no runtime implemented or published.
-Date: 2026-09-12.
+Status: v0.1 implemented, not published. Date: 2026-09-12.
+
+## What exists today
+
+Built, tested, and working end to end against fake platform adapters:
+
+- Config loading and validation, rejecting a bad setup before any model call.
+- The run directory, atomic state file, and the Markdown checkpoint format.
+- Git worktrees per task, write-scope enforcement including renames, and
+  sequential integration with combined checks.
+- The Claude Code and Codex adapters, both satisfying a shared conformance
+  suite.
+- The orchestrator: checkpoint, switch on a usage limit, wait when both
+  platforms are capped, and resume from the latest checkpoint set on disk.
+- The CLI: `run`, `status`, `switch`, `resume`, `doctor`.
+
+**Not verified:** limit detection has never met a real usage limit. Every test
+uses fake adapters. Codex's exact wire shape for a rate limit is an educated
+guess. A live run against both platforms is required before calling v0.1 done,
+and it is the one step that cannot be automated.
 
 ## Why
 

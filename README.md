@@ -13,8 +13,12 @@ the entire team, root included, relaunches on the other platform from those
 checkpoints. Two subscriptions you already pay for, one continuous session of
 work.
 
-Status: v0.1, working, not yet verified against a real usage limit. See
-[What is not done](#what-is-not-done).
+Status: v0.1. Both platform adapters have now run against their real CLIs,
+not just a stub, and real bugs turned up and got fixed doing it. Two things
+that would make this a finished product are still not true: **a run cannot
+finish on its own** — nothing ever marks a task done, so it takes a human to
+stop one — and no real usage limit has fired yet to prove out the whole
+reason CAPO exists. See [What is not done](#what-is-not-done).
 
 ## How it works
 
@@ -190,13 +194,20 @@ reopen that conversation.
 
 ## Ownership and integration
 
-Every task gets its own git worktree and a declared write scope. Before the
-root integrates a result, CAPO independently checks the diff against that
-scope, including files moved out of it by a rename. Accepted results merge one
-at a time into an integration worktree, and the combined checks run there.
+Every task gets its own git worktree and a declared write scope. A
+coordinator assigned exactly one task runs inside that task's worktree; one
+assigned more than one still runs in the shared workspace instead, because
+isolation for that case isn't built yet.
 
-A coordinator saying it finished does not make a run successful. Only the
-integrated, tested result does.
+CAPO can independently check a diff against a task's write scope, including
+files moved out of it by a rename, and can merge accepted results one at a
+time into an integration worktree and run the combined checks there. **Both
+exist and are tested, and neither runs automatically today.** Nothing calls
+them during a live run: a coordinator has no way to tell CAPO a task is done,
+so no task ever leaves its initial `ready` state and integration never fires.
+A coordinator saying it finished does not make a run successful — but
+nothing else currently makes one successful either. The only thing that ends
+a run today is a human stopping it.
 
 CAPO commits with your own git identity and your own signing configuration. It
 will tell you if git has no identity configured rather than inventing one.
@@ -216,8 +227,16 @@ The host conversation is a control panel. It is never the root session.
 
 ## What is not done
 
-v0.1 deliberately stops well short of the full design in
-[docs/roadmap.md](docs/roadmap.md). Not included:
+**A run cannot finish.** No coordinator has any way to signal a task is done.
+A task's state is set once, at launch, and never advances past `ready` —
+`capo status` will show every task sitting there for the life of the run. The
+integration engine (merge into an integration worktree, run the combined
+checks) is built and has its own tests, but a live run never calls it. Today
+the only way a run reaches `done` is a human stopping it. This is the biggest
+gap in v0.1 and the one closest to making the rest of this document's claims
+actually true end to end.
+
+Also not done, and known since before today:
 
 - Moving a single task between platforms while the rest of the team keeps
   running. v0.1 moves the whole team at once.
@@ -225,11 +244,34 @@ v0.1 deliberately stops well short of the full design in
 - A long-running service, leases, fencing tokens, or an event journal.
 - An adapter SDK or third-party platforms such as Gemini.
 - Usage-aware routing ahead of limits, and automatic switch-back.
+- Surfacing approvals or questions from a session anywhere. A session that
+  stalls waiting for approval is only marked `stalled` (visible in `capo
+  status`, `STATUS.md`, and its transcript); nothing lets a person answer it
+  through CAPO. A live Codex coordinator hit exactly this and sat idle.
 
-**Not yet verified:** every test runs against fake platform adapters, so limit
-detection has never met a real usage limit. Codex's exact wire shape for a rate
-limit in particular is an educated guess. Until a live run confirms both, treat
-limit detection as unproven.
+Found today, while running both adapters for real:
+
+- A coordinator assigned more than one task still runs in the shared
+  workspace instead of an isolated worktree. Only the one-task-per-coordinator
+  case is isolated.
+- `roles/worker.md` and the worker model column in `models:` are validated by
+  config and handed to each coordinator to relay, but CAPO never spawns a
+  worker itself — coordinators do, using their host's native subagent
+  mechanism — so nothing here actually exercises that path.
+- Installing straight from GitHub with no local clone should work now that
+  the built plugin bundles are committed to the repository instead of
+  gitignored, but nobody has run that path end to end yet.
+
+**Not yet verified:** no real usage limit has fired on either platform.
+Claude Code's detection was rewritten today to read the CLI's own structured
+`rate_limit_event` (`rate_limit_info.status: allowed | allowed_warning |
+rejected`), confirmed to exist in the installed CLI's schema — a real
+improvement over pattern-matching assistant text — but the `rejected` status
+itself has never been observed live. Codex's detection is still
+pattern-matching text; its actual wire shape for a limit remains an educated
+guess. Codex has also never run a full orchestration, only single turns and
+one hand-forced switch. Until a live run confirms all of that, treat limit
+detection as unproven.
 
 ## A note on terms of service
 
@@ -254,8 +296,19 @@ design in [docs/roadmap.md](docs/roadmap.md), and the build plan in
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The one rule worth reading before you
 touch an adapter: a stub proves almost nothing here, and
-[docs/notes/codex-live-findings.md](docs/notes/codex-live-findings.md) explains
-why in detail.
+[docs/notes/codex-live-findings.md](docs/notes/codex-live-findings.md) and
+[docs/notes/claude-live-findings.md](docs/notes/claude-live-findings.md) explains
+why in detail — a single live Codex run found eight real defects in code that
+had 220 passing tests against the stub. The Claude Code adapter has since had
+its own live run too (see the header comment in
+`packages/core/src/adapters/claude.ts`), which found and fixed three more:
+a spuriously repeated `ready` event, a swallowed failed turn, and usage-limit
+detection that was pattern-matching text no real run ever produces instead of
+reading the CLI's actual structured event. Real coordinators running under
+CAPO on Claude Code have since diagnosed and fixed real bugs against the
+[`examples/two-coordinators`](examples/two-coordinators) project, with tests
+passing on both sides — the closest thing to evidence yet that the design
+works, short of surviving an actual usage limit.
 
 Security issues go through
 [private vulnerability reporting](https://github.com/whitewolfx7/capo/security/advisories/new),

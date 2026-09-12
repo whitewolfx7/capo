@@ -1,25 +1,69 @@
 # CAPO — Concurrent Agent Platform Orchestrator
 
-Status: v0.1 implemented, not published. Date: 2026-09-12.
+Status: v0.1 implemented, not published. Date: 2026-09-13.
 
 ## What exists today
 
-Built, tested, and working end to end against fake platform adapters:
+Built and tested, and — for the platform adapters specifically — no longer
+resting only on fake ones:
 
 - Config loading and validation, rejecting a bad setup before any model call.
 - The run directory, atomic state file, and the Markdown checkpoint format.
-- Git worktrees per task, write-scope enforcement including renames, and
-  sequential integration with combined checks.
+- Git worktrees per task and write-scope enforcement including renames. A
+  coordinator that owns exactly one task runs inside that task's worktree.
+  The integration engine (merge accepted results into an integration
+  worktree, run the combined checks) is built and has its own tests, but see
+  below: nothing in a live run calls it yet.
 - The Claude Code and Codex adapters, both satisfying a shared conformance
-  suite.
+  suite. Both have now been run against their real CLIs, not only the fake
+  one. The Claude Code run found and fixed three real bugs: a repeated
+  `system`/`init` line was spuriously re-queuing a `ready` event on every
+  turn, a failed `result` line was being treated as a normal turn end instead
+  of surfacing an error, and usage-limit detection was pattern-matching
+  assistant prose for a phrase a real run never produces. It now reads the
+  CLI's own structured `rate_limit_event` / `rate_limit_info` object instead
+  (`status: allowed | allowed_warning | rejected`, plus `resetsAt` and
+  `rateLimitType`) — see `packages/core/src/adapters/claude.ts` and
+  `__fixtures__/README.md` for the captures this came from. The earlier
+  Codex live run found and fixed eight further defects; see
+  [notes/codex-live-findings.md](notes/codex-live-findings.md).
 - The orchestrator: checkpoint, switch on a usage limit, wait when both
-  platforms are capped, and resume from the latest checkpoint set on disk.
+  platforms are capped, and resume from the latest checkpoint set on disk. A
+  stall watchdog marks a session `stalled` — in state, `STATUS.md`, and its
+  transcript — once it goes quiet past `stallTimeoutMs`. That is the only
+  thing it does: it does not act on a stall or answer it.
 - The CLI: `run`, `status`, `switch`, `resume`, `doctor`.
+- Both plugins install into their host. Their built bundles
+  (`plugins/*/capo/dist/capo.mjs`) are committed to the repository rather
+  than gitignored, so a fresh checkout has what a marketplace install needs.
 
-**Not verified:** limit detection has never met a real usage limit. Every test
-uses fake adapters. Codex's exact wire shape for a rate limit is an educated
-guess. A live run against both platforms is required before calling v0.1 done,
-and it is the one step that cannot be automated.
+**The largest thing not done: a run cannot finish.** Nothing marks a task
+done — every task is created directly in the `ready` state at launch and
+nothing in this codebase ever moves it further (`pending`, `running`,
+`blocked`, `review`, `done`, and `failed` are all declared on `TaskState` but
+unused). The integration engine above is real but is never invoked during a
+run. `capo status` will show every task sitting at `ready` for as long as the
+run lives. The only way a run reaches `done` today is a human stopping it —
+there is no `capo stop` command; it happens on process signal.
+
+**Not verified:**
+
+- No real usage limit has fired on either platform. Claude Code's detection
+  now reads a structured event confirmed to exist in the installed CLI's own
+  schema, but the `"rejected"` status that would actually trigger it has
+  never been observed live. Codex's detection is still message-pattern
+  matching; its real wire shape for a limit remains an educated guess.
+- Codex has never completed a full orchestration — only single turns and one
+  hand-forced platform switch.
+- A coordinator assigned more than one task still runs in the shared
+  workspace rather than an isolated worktree; only the one-task case is
+  isolated.
+- `roles/worker.md` and the worker model column are validated by config and
+  handed to each coordinator to relay in its prompt, but CAPO never spawns a
+  worker itself — coordinators do, using their host's native subagent
+  mechanism — so this path has no test that actually launches a worker.
+- Installing straight from GitHub with no local clone should work now that
+  bundles are committed, but nobody has run it end to end yet.
 
 ## Why
 
@@ -257,10 +301,17 @@ programmatic surface:
 Each adapter must do four things: start a session with a role, model, and
 initial prompt; send a message; stream events; and report a **usage limit** as
 a structured event with a reset time when the platform provides one. Limit
-detection is the one adapter feature v0.1 cannot ship without, and it needs a
-live test on each platform, not only a fixture.
+detection is the one adapter feature v0.1 cannot ship without. Claude Code's
+mapping now comes from a real captured stream rather than a guess (see
+above); Codex's still needs a live test against an actual limit, not only a
+fixture.
 
-Approvals and questions from any session are surfaced in the CAPO terminal.
+Approvals and questions from a session are not surfaced anywhere. There is no
+approval channel: a session that stalls waiting for one is only marked
+`stalled` by the watchdog above and left there. A live Codex run hit this
+directly — a coordinator diagnosed its bug, asked for approval to apply the
+fix, and then sat idle with no way for a person to answer it through CAPO.
+Surfacing and answering approvals from the CAPO terminal is unbuilt.
 
 ## Plugins
 
@@ -311,10 +362,17 @@ run started from one host and switched from the other.
 
 ## Integration
 
-Coordinators report a task done with its worktree commit and test evidence. The
-root merges accepted tasks one at a time into an integration worktree, runs the
-combined checks, and marks the run complete. A coordinator's own report never
-marks the run done.
+The design: coordinators report a task done with its worktree commit and test
+evidence, the root merges accepted tasks one at a time into an integration
+worktree, runs the combined checks, and marks the run complete. A
+coordinator's own report should never by itself mark the run done.
+
+**That is not what happens today.** The merge-and-check engine
+(`packages/core/src/integrate/merge.ts`) exists and is tested in isolation,
+but nothing in a live run calls it: there is no path from a coordinator
+reporting a task done to a task's state actually changing, so integration is
+never triggered and a run's status never becomes `done` on its own. Reaching
+`done` today means a human stops the run.
 
 ## Acceptance demo
 
@@ -350,8 +408,12 @@ in [roadmap.md](roadmap.md).
 
 ## References
 
-Installed CLI versions observed: Codex 0.147.0; Claude Code 2.1.236. Presence
-and help output were checked; authenticated agent runs have not been tested.
+Installed CLI versions observed: Codex 0.147.0 and 0.154.0; Claude Code
+2.1.236. Both platforms have now had authenticated agent runs against the
+real CLI, not only presence and help-output checks — see
+[notes/codex-live-findings.md](notes/codex-live-findings.md) for Codex and
+`packages/core/src/adapters/claude.ts` / `__fixtures__/README.md` for Claude
+Code.
 
 - Codex App Server: https://learn.chatgpt.com/docs/app-server
 - Codex subagents: https://learn.chatgpt.com/docs/agent-configuration/subagents

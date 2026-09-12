@@ -39,7 +39,7 @@ codex plugin list
 This is the option that has actually been run end to end (see **Verified**
 below).
 
-## Install option B: directly from the public repository (not yet usable)
+## Install option B: directly from the public repository (untested end to end)
 
 `codex plugin marketplace add` also accepts `owner/repo`, an HTTPS git URL, or
 an SSH git URL, which would let anyone install CAPO with no local clone or
@@ -50,20 +50,21 @@ codex plugin marketplace add whitewolfx7/capo
 codex plugin add capo@capo
 ```
 
-**This does not work today**, and it is not a Codex limitation: CAPO's own
-`.gitignore` excludes `dist/` everywhere in the repo, so `plugins/codex/capo/dist/`
-is never committed. A checkout of the bare GitHub repo has a `plugin.json` and a
-`skills/` directory but no `capo.mjs` for the skill to run — `npm run build`
-never happened. Codex's `marketplace add` and `plugin add` copy the plugin
-directory as-is; neither one runs `npm install` or a build step. Until the
-project ships a release process that publishes a build (either by carving a
-`.gitignore` exception for the two `plugins/*/capo/dist/` directories and
-committing built bundles, or by producing a release artifact/branch where they
-already exist), option B stays local-clone-only in practice: clone, build, then
-run this same `owner/repo` form against your own clone's remote if you want to
-test it, or just use option A. See
+Until recently this could not work: CAPO's `.gitignore` excluded `dist/`
+everywhere in the repo, so `plugins/codex/capo/dist/` was never committed and
+a bare checkout had `plugin.json` and `skills/` but no `capo.mjs` for the
+skill to run. `.gitignore` now carries an explicit exception for
+`plugins/*/capo/dist/`, and the built bundles are committed alongside the
+source, so a fresh clone of the public repository should have everything
+`codex plugin add` needs.
+
+**This has not been run end to end** — nobody has pointed a machine that has
+never cloned CAPO at `whitewolfx7/capo` and confirmed `codex plugin list`
+reports `installed, enabled` the way the local-clone path (option A) already
+does. Try it and open an issue if it does not behave as described. See
 [`docs/notes/codex-marketplace-publishing.md`](notes/codex-marketplace-publishing.md)
-for the exact steps needed to make option B real.
+for the investigation that found and explained the original gitignore
+problem.
 
 ## Check it works
 

@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './config/load.js';
 export * from './state/store.js';
+export * from './state/status-md.js';
 export * from './checkpoint/render.js';
 export * from './checkpoint/store.js';
 export * from './git/repo.js';

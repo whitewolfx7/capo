@@ -85,7 +85,8 @@ function renderHuman(state: RunState, live: boolean, runId: string): string {
     lines.push('  (none yet)');
   } else {
     for (const s of sessions) {
-      lines.push(`  ${s.id}  role=${s.role}  platform=${s.platform}  status=${s.status}`);
+      const sid = s.platformSessionId !== undefined ? `  session-id=${s.platformSessionId}` : '';
+      lines.push(`  ${s.id}  role=${s.role}  platform=${s.platform}  status=${s.status}${sid}`);
     }
   }
   lines.push('');

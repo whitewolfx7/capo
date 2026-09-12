@@ -5,7 +5,7 @@
  * in docs/architecture.md, "The rule".
  */
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type {
   AdapterEvent,
@@ -24,6 +24,7 @@ import type {
 } from '../types.js';
 import type { StateStore } from '../state/store.js';
 import { latestCheckpointSet, writeCheckpointSet } from '../checkpoint/store.js';
+import { renderStatusMarkdown } from '../state/status-md.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
 import { headCommit, addWorktree } from '../git/repo.js';
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
@@ -72,6 +73,23 @@ export class Orchestrator {
    * creates a git worktree per configured task, seeds `state.tasks`, then
    * launches every session on `config.startOn`.
    */
+  /**
+   * Every state change goes through here so `STATUS.md` is refreshed with it.
+   *
+   * CAPO's sessions are headless: they appear in no host's session list and
+   * there is no window to open. Without a generated view, the only way to see
+   * what a run is doing is to read raw JSON.
+   */
+  async #update(fn: (draft: RunState) => void): Promise<RunState> {
+    const next = await this.#state.update(fn);
+    try {
+      await writeFile(join(this.#runDir, 'STATUS.md'), renderStatusMarkdown(next), 'utf8');
+    } catch {
+      // A view is never worth failing a run over.
+    }
+    return next;
+  }
+
   async start(): Promise<void> {
     const base = await headCommit(this.#config.workspace);
 
@@ -92,7 +110,7 @@ export class Orchestrator {
       });
     }
 
-    await this.#state.update((draft) => {
+    await this.#update((draft) => {
       draft.baseCommit = base;
       for (const record of taskRecords) draft.tasks[record.id] = record;
     });
@@ -134,7 +152,7 @@ export class Orchestrator {
       checkpoints.set(checkpoint.sessionId, checkpoint);
     }
 
-    await this.#state.update((draft) => {
+    await this.#update((draft) => {
       draft.status = 'running';
       // Drop limit records that are no longer in the future, including ones
       // whose reset time the platform never told us. Those are treated as
@@ -174,7 +192,7 @@ export class Orchestrator {
     this.#switching = true;
     try {
       const checkpoints = await this.#checkpointAndCloseAll(reason);
-      await this.#state.update((draft) => {
+      await this.#update((draft) => {
         draft.status = 'done';
         for (const sessionId of checkpoints.keys()) {
           const record = draft.sessions[sessionId];
@@ -192,18 +210,18 @@ export class Orchestrator {
 
     const target = to ?? this.#pickTarget(fromPlatform);
     if (target === undefined) {
-      await this.#state.update((draft) => {
+      await this.#update((draft) => {
         draft.status = 'waiting';
       });
       this.events.emit('waiting');
       return;
     }
 
-    await this.#state.update((draft) => {
+    await this.#update((draft) => {
       draft.activePlatform = target;
     });
     await this.#launchAll(target, checkpoints);
-    await this.#state.update((draft) => {
+    await this.#update((draft) => {
       draft.status = 'running';
     });
     this.events.emit('switched');
@@ -231,7 +249,7 @@ export class Orchestrator {
    * session. Returns the collected checkpoints, keyed by session id.
    */
   async #checkpointAndCloseAll(reason: PauseReason): Promise<Map<SessionId, Checkpoint>> {
-    await this.#state.update((draft) => {
+    await this.#update((draft) => {
       draft.status = 'switching';
     });
 
@@ -245,7 +263,7 @@ export class Orchestrator {
       }),
     );
 
-    const stateAfterIncrement = await this.#state.update((draft) => {
+    const stateAfterIncrement = await this.#update((draft) => {
       draft.pauseCount += 1;
     });
 
@@ -374,7 +392,7 @@ export class Orchestrator {
     const session = await adapter.start(opts);
     this.#live.set(sessionId, { session, role, platform });
 
-    await this.#state.update((draft) => {
+    await this.#update((draft) => {
       draft.sessions[sessionId] = {
         id: sessionId,
         role,
@@ -400,7 +418,7 @@ export class Orchestrator {
   async #onEvent(sessionId: SessionId, platform: PlatformId, event: AdapterEvent): Promise<void> {
     switch (event.kind) {
       case 'ready': {
-        await this.#state.update((draft) => {
+        await this.#update((draft) => {
           const record = draft.sessions[sessionId];
           if (record) {
             record.platformSessionId = event.platformSessionId;
@@ -428,7 +446,7 @@ export class Orchestrator {
       }
 
       case 'usage-limit': {
-        await this.#state.update((draft) => {
+        await this.#update((draft) => {
           draft.limits[platform] = {
             detectedAt: new Date().toISOString(),
             resetAt: event.resetAt,
@@ -446,7 +464,7 @@ export class Orchestrator {
       case 'error': {
         this.#log(`[${sessionId}] error: ${event.message}`);
         if (!event.retryable) {
-          await this.#state.update((draft) => {
+          await this.#update((draft) => {
             const record = draft.sessions[sessionId];
             if (record) record.status = 'failed';
           });

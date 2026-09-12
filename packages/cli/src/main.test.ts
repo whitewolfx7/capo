@@ -133,3 +133,62 @@ describe('capo CLI', () => {
     }
   });
 });
+
+describe('capo status liveness', () => {
+  let dir: string;
+
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'capo-live-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  /**
+   * state.json records what a run was doing, not whether anyone is still
+   * doing it. A crashed orchestrator leaves a file that still says "running"
+   * with every session "running". Reporting that as healthy is worse than
+   * saying nothing, because the user's next move depends on knowing to
+   * resume.
+   */
+  async function seed(runId: string, pid?: number): Promise<void> {
+    const runPath = runDir(dir, runId);
+    await StateStore.create(runPath, baseState(runId));
+    if (pid !== undefined) {
+      await writeFile(join(runPath, 'orchestrator.pid'), String(pid));
+    }
+  }
+
+  it('warns and names the resume command when the orchestrator is gone', async () => {
+    // PID 2^22 is above the default pid_max on Linux and macOS, so it is a
+    // pid that reliably does not exist.
+    await seed('2026-09-12-001', 4_194_304);
+    const { io, out } = capture();
+    expect(await main(['status', '2026-09-12-001', '--workspace', dir], io)).toBe(0);
+    const text = out.join('\n');
+    expect(text).toMatch(/no live orchestrator process/i);
+    expect(text).toContain('capo resume 2026-09-12-001');
+  });
+
+  it('warns when there is no pid file at all', async () => {
+    await seed('2026-09-12-002');
+    const { io, out } = capture();
+    expect(await main(['status', '2026-09-12-002', '--workspace', dir], io)).toBe(0);
+    expect(out.join('\n')).toMatch(/no live orchestrator process/i);
+  });
+
+  it('reports live false in JSON so a script can tell', async () => {
+    await seed('2026-09-12-003', 4_194_304);
+    const { io, out } = capture();
+    expect(await main(['status', '2026-09-12-003', '--json', '--workspace', dir], io)).toBe(0);
+    const doc = JSON.parse(out.join('\n')) as { live: boolean; status: string };
+    expect(doc.live).toBe(false);
+    expect(doc.status).toBe('running');
+  });
+
+  it('reports live true when the process really is running', async () => {
+    await seed('2026-09-12-004', process.pid);
+    const { io, out } = capture();
+    expect(await main(['status', '2026-09-12-004', '--json', '--workspace', dir], io)).toBe(0);
+    expect((JSON.parse(out.join('\n')) as { live: boolean }).live).toBe(true);
+    const human = capture();
+    await main(['status', '2026-09-12-004', '--workspace', dir], human.io);
+    expect(human.out.join('\n')).not.toMatch(/no live orchestrator/i);
+  });
+});

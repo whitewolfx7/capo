@@ -13,6 +13,17 @@ import { clearPidFile } from './pid.js';
 
 export function blockUntilStopped(orchestrator: Orchestrator, dir: string, log: (line: string) => void): Promise<void> {
   return new Promise<void>((resolve) => {
+    // Hold the event loop open for the life of the run.
+    //
+    // An unresolved promise does not keep Node running, and neither do the
+    // signal listeners below. Without this the orchestrator exits the moment
+    // nothing else is pending, and Node prints "Detected unsettled top-level
+    // await" on the way out. That is not hypothetical: a Codex session runs
+    // one child process per turn, so between turns there may be no open
+    // handle at all, and the run would die silently mid-flight leaving a
+    // state.json that still says "running".
+    const keepAlive = setInterval(() => {}, 1 << 30);
+
     const onControlSignal = (): void => {
       void handleControlSignal(orchestrator, dir, log);
     };
@@ -28,6 +39,7 @@ export function blockUntilStopped(orchestrator: Orchestrator, dir: string, log: 
         .stop()
         .catch((err) => log(`stop error: ${err instanceof Error ? err.message : String(err)}`))
         .finally(() => {
+          clearInterval(keepAlive);
           void clearPidFile(dir).finally(resolve);
         });
     };

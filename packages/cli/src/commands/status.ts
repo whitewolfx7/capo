@@ -4,12 +4,19 @@
  * Reads `state.json` for one run (the latest under the workspace, unless a
  * run id is given) and prints either a human-readable summary or, with
  * `--json`, a document a script can parse.
+ *
+ * It also checks whether the orchestrator process is actually alive. state.json
+ * records what the run was doing, not whether anyone is still doing it: a
+ * killed or crashed orchestrator leaves a file that still says "running" with
+ * every session "running". Reporting that as healthy is worse than useless,
+ * because the user's next move depends on knowing to resume.
  */
 import { resolve } from 'node:path';
 import { readState, runDir } from '@capo/core';
 import type { RunState } from '@capo/core';
 import type { Io } from '../io.js';
 import { reportError } from '../lib/errors.js';
+import { isPidAlive, readPidFile } from '../lib/pid.js';
 import { latestRunId } from '../lib/run-locate.js';
 
 export interface StatusOpts {
@@ -26,7 +33,14 @@ export async function runStatus(opts: StatusOpts, io: Io): Promise<number> {
     const dir = runDir(workspace, runId);
     const state = await readState(dir);
 
-    io.out(opts.json ? JSON.stringify(toJsonDoc(state), null, 2) : renderHuman(state));
+    const pid = await readPidFile(dir);
+    const live = pid !== undefined && isPidAlive(pid);
+
+    io.out(
+      opts.json
+        ? JSON.stringify({ ...toJsonDoc(state), orchestratorPid: pid ?? null, live }, null, 2)
+        : renderHuman(state, live, runId),
+    );
     return 0;
   } catch (err) {
     return reportError(err, io);
@@ -52,9 +66,16 @@ function toJsonDoc(state: RunState): Record<string, unknown> {
   };
 }
 
-function renderHuman(state: RunState): string {
+function renderHuman(state: RunState, live: boolean, runId: string): string {
   const lines: string[] = [];
   lines.push(`run ${state.runId}  [${state.status}]  active platform: ${state.activePlatform}`);
+  if (!live && state.status !== 'done' && state.status !== 'failed') {
+    lines.push(
+      `WARNING: no live orchestrator process. The state below is the last thing`,
+    );
+    lines.push(`         it wrote, not what is happening now.`);
+    lines.push(`         Continue it with: capo resume ${runId}`);
+  }
   lines.push(`base commit: ${state.baseCommit || '(not yet set)'}   pauses: ${state.pauseCount}`);
   lines.push('');
 

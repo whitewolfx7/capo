@@ -55,7 +55,7 @@ platforms:
   claude:
     driver: claude-code
   codex:
-    driver: codex-app-server
+    driver: codex
 
 start_on: claude
 

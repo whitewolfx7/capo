@@ -12,7 +12,7 @@ workspace: .
 objective: ./context/GOAL.md
 platforms:
   claude: { driver: claude-code }
-  codex: { driver: codex-app-server }
+  codex: { driver: codex }
 start_on: claude
 models:
   root: { claude: opus, codex: gpt-5-codex }

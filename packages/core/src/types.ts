@@ -42,6 +42,13 @@ export interface CapoConfig {
   coordinators: { id: SessionId }[];
   tasks: ConfigTask[];
   limits: { maxWorkersPerCoordinator: number };
+  /**
+   * Write a live, human-readable transcript per session under the run's
+   * `transcripts/` directory. On by default: CAPO's sessions are headless and
+   * invisible to the host, so without this there is no way to watch the work.
+   * Set `transcripts: false` to turn it off.
+   */
+  transcripts: boolean;
 }
 
 /* ---------- run state ---------- */

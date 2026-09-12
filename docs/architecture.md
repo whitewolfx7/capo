@@ -194,6 +194,7 @@ State on disk, gitignored:
     config.resolved.json     # frozen effective config
     state.json               # active platform, session ids, task table, reset times
     checkpoints/<n>/         # one directory per pause
+    transcripts/<session>.md # live, human-readable log of each session
     STATUS.md                # generated readable view
 ```
 
@@ -211,6 +212,33 @@ Each task gets a git worktree from the run's base commit. Write scopes are
 declared, and CAPO checks a submitted diff stays inside its scope before the
 root integrates it. There are no leases or fencing tokens; one active platform
 at a time means there is no second writer to fence.
+
+## Seeing what is happening
+
+CAPO drives its sessions headlessly, with `claude -p` and `codex exec`. That is
+what makes a control channel possible: CAPO can ask a session for a checkpoint
+at any moment and read the reply. The cost is that the sessions appear in no
+host's session list and there is no window to open. Without help you are paying
+for several agents to work and can see none of them.
+
+Interactive mode is not an alternative. Claude Code's `--bg` returns
+immediately and gives up the streaming channel, so CAPO could no longer request
+a checkpoint, which is the one thing it must be able to do.
+
+So the sessions stay headless and everything they emit is mirrored to disk:
+
+- `transcripts/<session>.md`, appended as events arrive. `tail -f` shows the
+  work in real time, and the file remains afterwards. A header marks each
+  launch with its platform and model, so a transcript that spans a switch
+  shows exactly where the session moved. A usage limit is called out in the
+  transcript along with what CAPO is doing about it. On by default; set
+  `transcripts: false` in the config to turn it off.
+- `STATUS.md`, rebuilt on every state change: sessions, tasks, limits seen, and
+  whether the run is parked waiting for a reset.
+- `capo status`, which prints the same and each session's platform session id.
+
+That last one is a handle, not just a label. For Claude Code it is the
+`--session-id` CAPO generated, so the conversation is a real stored session.
 
 ## Platform adapters
 

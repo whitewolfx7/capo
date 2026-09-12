@@ -43,5 +43,9 @@ tasks:
     brief: ./tasks/component-b.md
     write_scope: [src/component-b/]
 
+# Live per-session logs under .capo/runs/<id>/transcripts/. On by default.
+# tail -f them to watch the team work.
+transcripts: true
+
 limits:
   max_workers_per_coordinator: 2

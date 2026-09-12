@@ -100,6 +100,8 @@ tasks:             # optional: leave empty and the root decomposes the objective
     brief: ./tasks/component-b.md
     write_scope: [src/component-b/]
 
+transcripts: true  # default; writes a live log per session you can tail -f
+
 limits:
   max_workers_per_coordinator: 2
 ```
@@ -150,6 +152,32 @@ Build the HTTP client with retries.
 Checkpoints are never overwritten. Each pause writes a new numbered set under
 `.capo/runs/<run-id>/checkpoints/`, alongside an index naming the reason for
 the pause.
+
+## Watching a run
+
+CAPO's sessions are headless, so they never show up in Claude Code's or Codex's
+session list and there is no window to open. Everything they do is mirrored to
+disk instead.
+
+```bash
+tail -f .capo/runs/<run-id>/transcripts/*.md
+```
+
+That is the live view: what each session says, the tools it runs, and a loud
+marker when a usage limit hits, followed by CAPO moving the team. Each launch
+writes a header naming the platform and model, so a transcript that spans a
+switch shows exactly where the session went.
+
+`.capo/runs/<run-id>/STATUS.md` is rebuilt on every state change and holds the
+same information `capo status` prints: sessions, tasks, limits seen, and
+whether the run is parked waiting for a reset.
+
+Transcripts are on by default. Set `transcripts: false` in the config to turn
+them off.
+
+`capo status` also prints each session's platform session id. For Claude Code
+that is a real session id CAPO generated, so `claude --resume <id>` should
+reopen that conversation.
 
 ## Ownership and integration
 

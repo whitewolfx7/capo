@@ -25,6 +25,7 @@ import type {
 import type { StateStore } from '../state/store.js';
 import { latestCheckpointSet, writeCheckpointSet } from '../checkpoint/store.js';
 import { renderStatusMarkdown } from '../state/status-md.js';
+import { appendTranscript, renderEvent, renderSessionHeader } from './transcript.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
 import { headCommit, addWorktree } from '../git/repo.js';
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
@@ -389,6 +390,16 @@ export class Orchestrator {
       prompt: checkpoint ? 'Resume your work from your checkpoint, above.' : 'Begin work toward the objective, above.',
     };
 
+    if (this.#config.transcripts) {
+      // A header per launch, so a transcript that spans a platform switch
+      // makes it obvious where the session moved and which model took over.
+      void appendTranscript(
+        this.#runDir,
+        sessionId,
+        renderSessionHeader(sessionId, platform, model, checkpoint !== undefined),
+      );
+    }
+
     const session = await adapter.start(opts);
     this.#live.set(sessionId, { session, role, platform });
 
@@ -416,6 +427,14 @@ export class Orchestrator {
   }
 
   async #onEvent(sessionId: SessionId, platform: PlatformId, event: AdapterEvent): Promise<void> {
+    // Mirror everything to the session's transcript first, so a reader sees
+    // the work as it happens even for events CAPO itself ignores. This never
+    // throws and never blocks the state machine below.
+    if (this.#config.transcripts) {
+      const line = renderEvent(event);
+      if (line !== undefined) void appendTranscript(this.#runDir, sessionId, line);
+    }
+
     switch (event.kind) {
       case 'ready': {
         await this.#update((draft) => {

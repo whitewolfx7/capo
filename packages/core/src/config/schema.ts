@@ -42,6 +42,7 @@ export const configFileSchema = z
           .strict(),
       )
       .default([]),
+    transcripts: z.boolean().default(true),
     limits: z
       .object({
         max_workers_per_coordinator: z.number().int().positive().default(2),

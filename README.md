@@ -248,4 +248,4 @@ design in [docs/roadmap.md](docs/roadmap.md), and the build plan in
 
 ## License
 
-Apache-2.0.
+MIT. See [LICENSE](LICENSE).

@@ -7,7 +7,7 @@ Date: 2026-09-12.
 
 A platform-neutral local orchestration framework exposed through a CLI, MCP, and optional platform plugin bundles. One root agent plans and integrates work. A configurable set of coordinator sessions delegates bounded tasks through installed platform adapters. The initial configuration has two coordinators, Claude Code and Codex, on the same machine, as confirmed by the user. This is a starting configuration, not a fixed topology. Future platforms such as Gemini must be addable without modifying the scheduler, ownership rules, persistence schema, or handoff protocol.
 
-CAPO stands for Concurrent Agent Platform Orchestrator. Its project home is `/home/user/Desktop/CAPO`. All CAPO design documents, implementation, examples, packaging, and tests belong there. CAPO should become an independent open-source repository; public repository owner and final release metadata remain release decisions, not runtime dependencies.
+CAPO stands for Concurrent Agent Platform Orchestrator. All CAPO design documents, implementation, examples, packaging, and tests live in this repository. CAPO is an independent open-source project; release metadata is a release decision, not a runtime dependency.
 
 ## Approach selection
 
@@ -239,7 +239,7 @@ The initial release must verify fresh installation on both hosts, discovery of C
 
 Proposed CLI surface: init, doctor, run, status, events, resume, cancel, context update. Proposed MCP surface covers task creation/claiming, delegation registration, heartbeats, inbox/acknowledgements, hints, context read/propose/update, handoff offer/accept, result submission, and integration status. Mutations authenticate the caller's session identity and role rather than accepting an arbitrary actor ID from the model.
 
-Prepare a permissive license choice (proposed Apache-2.0), README led by Codex and Claude plugin installation, protocol specification, contribution guide, security reporting instructions, CI, and a reproducible demo. Release only framework sources and synthetic examples; runtime conversations and unrelated workspace code are not package inputs. Validate a clean install from a release artifact before public release.
+Prepare a permissive license (MIT), README led by Codex and Claude plugin installation, protocol specification, contribution guide, security reporting instructions, CI, and a reproducible demo. Release only framework sources and synthetic examples; runtime conversations and unrelated workspace code are not package inputs. Validate a clean install from a release artifact before public release.
 
 ## Acceptance demonstration
 

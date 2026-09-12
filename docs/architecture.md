@@ -201,8 +201,12 @@ programmatic surface:
 
 - **Claude Code**: headless JSON event mode with session IDs and explicit
   resume. Native subagents via the Agent tool.
-- **Codex**: App Server over stdio for session start, streaming events,
-  interrupt, and approvals. Native subagents via Codex's subagent support.
+- **Codex**: `codex exec --json` for a turn, `codex exec resume` to continue.
+  One turn per process, so a session owns a sequence of children behind one
+  event stream. Native subagents via Codex's subagent support. The `app-server`
+  surface is the eventual target and is scaffolded behind the same adapter, but
+  v0.1 does not use it: it is marked experimental, and `exec` is enough for
+  prompt in, event stream out.
 
 Each adapter must do four things: start a session with a role, model, and
 initial prompt; send a message; stream events; and report a **usage limit** as

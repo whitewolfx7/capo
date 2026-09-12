@@ -7,9 +7,10 @@
 - The `codex` and `claude` CLIs, both logged in. CAPO drives them; it never
   handles your credentials.
 
-## Build the bundle
+## Install option A: local clone (verified)
 
-CAPO is not published to a public marketplace yet, so install from a clone.
+CAPO is not listed in any hosted plugin directory yet, so the tested path is
+to build the bundle yourself and point Codex at that local checkout.
 
 ```bash
 git clone https://github.com/whitewolfx7/capo.git && cd capo
@@ -21,10 +22,8 @@ npm run build:plugins
 That writes a self-contained `plugins/codex/capo/dist/capo.mjs`. It carries its
 own dependencies, so it does not need the repo's `node_modules` at run time.
 
-## Install
-
-Codex installs plugins from a marketplace, and this repository is one. From any
-directory:
+Codex installs plugins from a marketplace, and this repository is one — it
+carries `.agents/plugins/marketplace.json` at its root. From any directory:
 
 ```bash
 codex plugin marketplace add /absolute/path/to/capo
@@ -37,15 +36,34 @@ Then confirm it is installed and enabled:
 codex plugin list
 ```
 
-`marketplace add` also accepts `owner/repo`, an HTTPS git URL, or an SSH git
-URL, so you can skip the clone entirely:
+This is the option that has actually been run end to end (see **Verified**
+below).
+
+## Install option B: directly from the public repository (not yet usable)
+
+`codex plugin marketplace add` also accepts `owner/repo`, an HTTPS git URL, or
+an SSH git URL, which would let anyone install CAPO with no local clone or
+build step:
 
 ```bash
 codex plugin marketplace add whitewolfx7/capo
 codex plugin add capo@capo
 ```
 
-That path has not been tested yet; the local-clone route above has.
+**This does not work today**, and it is not a Codex limitation: CAPO's own
+`.gitignore` excludes `dist/` everywhere in the repo, so `plugins/codex/capo/dist/`
+is never committed. A checkout of the bare GitHub repo has a `plugin.json` and a
+`skills/` directory but no `capo.mjs` for the skill to run — `npm run build`
+never happened. Codex's `marketplace add` and `plugin add` copy the plugin
+directory as-is; neither one runs `npm install` or a build step. Until the
+project ships a release process that publishes a build (either by carving a
+`.gitignore` exception for the two `plugins/*/capo/dist/` directories and
+committing built bundles, or by producing a release artifact/branch where they
+already exist), option B stays local-clone-only in practice: clone, build, then
+run this same `owner/repo` form against your own clone's remote if you want to
+test it, or just use option A. See
+[`docs/notes/codex-marketplace-publishing.md`](notes/codex-marketplace-publishing.md)
+for the exact steps needed to make option B real.
 
 ## Check it works
 

@@ -55,3 +55,15 @@ jobs:
           cd "$(mktemp -d)"
           node "$GITHUB_WORKSPACE/plugins/claude/capo/dist/capo.mjs" --version
           node "$GITHUB_WORKSPACE/plugins/codex/capo/dist/capo.mjs" --version
+
+      # The plugin bundles are COMMITTED, because both hosts install a plugin by
+      # cloning this repository. A stale committed bundle therefore ships broken
+      # code to every installer while CI stays green on the source. This fails
+      # the build if the tree no longer matches what the source produces.
+      - name: Committed plugin bundles are current
+        run: |
+          if ! git diff --quiet -- plugins; then
+            echo "::error::plugins/ is out of date. Run 'npm run build:plugins' and commit the result."
+            git diff --stat -- plugins
+            exit 1
+          fi

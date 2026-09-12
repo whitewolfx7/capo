@@ -1,6 +1,13 @@
 node_modules/
-dist/
 *.tsbuildinfo
+
+# TypeScript build output, rebuilt by `npm run build`.
+packages/*/dist/
+
+# NOT ignored: plugins/*/capo/dist/. Those are the published plugin bundles.
+# Claude Code and Codex install a plugin by cloning this repository, so the
+# built capo.mjs and the role files have to be committed or a marketplace
+# install lands a manifest pointing at a file that does not exist.
 .capo/
 coverage/
 .DS_Store

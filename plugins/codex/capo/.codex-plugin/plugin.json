@@ -3,26 +3,37 @@
   "version": "0.1.0",
   "description": "Run one AI agent team across Claude Code and Codex. When the active platform hits its usage limit, CAPO checkpoints the whole team and continues on the other one.",
   "author": {
-    "name": "CAPO contributors"
+    "name": "CAPO contributors",
+    "url": "https://github.com/whitewolfx7/capo"
   },
+  "homepage": "https://github.com/whitewolfx7/capo",
+  "repository": "https://github.com/whitewolfx7/capo",
   "license": "MIT",
   "keywords": [
     "orchestration",
     "multi-agent",
     "usage-limit",
-    "claude-code"
+    "claude-code",
+    "codex",
+    "checkpoint",
+    "failover"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "CAPO",
     "shortDescription": "Move an agent team to the other platform when one hits its usage limit.",
     "longDescription": "CAPO runs one AI agent team across Claude Code and Codex. When the active platform's usage limit hits, CAPO checkpoints every live session to Markdown and relaunches the same roles on the other platform from those checkpoints, so the work keeps going on your other subscription.",
+    "developerName": "CAPO contributors",
     "category": "Developer Tools",
     "capabilities": [
-      "Interactive"
+      "Interactive",
+      "Read",
+      "Write"
     ],
     "defaultPrompt": [
-      "Check the status of my CAPO run"
+      "Check the status of my CAPO run",
+      "Start a CAPO run from my orchestration config",
+      "Switch my CAPO run to the other platform"
     ]
   }
 }

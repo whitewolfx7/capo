@@ -20,7 +20,7 @@
     "@types/node": "^22.10.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
+    "vitest": "^5.0.0"
   },
   "license": "MIT",
   "description": "Run one AI agent team across Claude Code and Codex, switching platforms when one hits its usage limit.",

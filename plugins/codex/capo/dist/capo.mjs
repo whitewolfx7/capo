@@ -13925,6 +13925,47 @@ var Orchestrator = class {
     } catch (err) {
       this.#log(`[${sessionId}] pump error: ${err instanceof Error ? err.message : String(err)}`);
     }
+    const current = this.#live.get(sessionId);
+    if (current?.session !== session)
+      return;
+    this.#live.delete(sessionId);
+    this.#lastEventAt.delete(sessionId);
+    this.#stalledSet.delete(sessionId);
+    await this.#update((draft) => {
+      const record = draft.sessions[sessionId];
+      if (record && record.status !== "failed")
+        record.status = "stopped";
+    });
+    await this.#maybeAbandon();
+  }
+  /**
+   * Ends a run that has nothing left alive to finish it. A session dying is
+   * not by itself fatal -- the others may still be working, and a switch
+   * closes every session on purpose -- but once the last one is gone with
+   * the run still nominally in progress, no result can ever arrive and no
+   * integration can ever fire. Without this the process sits on its
+   * keepalive forever: a live Codex run whose sessions all failed on an
+   * unsupported model did exactly that, reporting "running" indefinitely.
+   */
+  async #maybeAbandon() {
+    if (this.#switching || this.#integrating)
+      return;
+    if (this.#live.size > 0)
+      return;
+    const state = this.#state.get();
+    if (state.status !== "running")
+      return;
+    const sessions = Object.values(state.sessions);
+    if (sessions.length === 0)
+      return;
+    const failed = sessions.filter((s) => s.status === "failed").map((s) => s.id);
+    await this.#update((draft) => {
+      draft.status = "failed";
+    });
+    this.#stopStallWatch();
+    const detail = failed.length > 0 ? `session(s) failed: ${failed.join(", ")}` : "every session ended";
+    this.#log(`run abandoned: ${detail}; nothing left to finish it`);
+    this.events.emit("abandoned", { reason: detail, failed });
   }
   async #onEvent(sessionId, platform, event) {
     if (this.#config.transcripts) {
@@ -14350,6 +14391,7 @@ function blockUntilStopped(orchestrator, dir, log) {
       process.off("SIGINT", onStopSignal);
       process.off("SIGTERM", onStopSignal);
       orchestrator.events.off("integration-finished", onIntegrationFinished);
+      orchestrator.events.off("abandoned", onAbandoned);
       clearInterval(keepAlive);
       void clearPidFile(dir).finally(resolve4);
     };
@@ -14366,10 +14408,19 @@ function blockUntilStopped(orchestrator, dir, log) {
       log(`run ${report.status}`);
       teardown();
     };
+    const onAbandoned = (report) => {
+      if (stopping)
+        return;
+      stopping = true;
+      log(`run abandoned: ${report.reason}`);
+      process.exitCode = 1;
+      teardown();
+    };
     process.on("SIGUSR2", onControlSignal);
     process.on("SIGINT", onStopSignal);
     process.on("SIGTERM", onStopSignal);
     orchestrator.events.once("integration-finished", onIntegrationFinished);
+    orchestrator.events.once("abandoned", onAbandoned);
   });
 }
 async function handleControlSignal(orchestrator, dir, log) {

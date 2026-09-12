@@ -229,6 +229,21 @@ export class FakeAdapter implements PlatformAdapter {
     state.queue.push(event);
   }
 
+  /**
+   * End a live session's event stream without the orchestrator having asked,
+   * the way a real session ends when its CLI process dies on its own. Unlike
+   * `close()`, this is not recorded in `closed`: nothing closed it, it just
+   * stopped.
+   */
+  endStream(sessionId: SessionId): void {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.closed) {
+      throw new Error(`fake adapter: cannot end session "${sessionId}": not started or already closed`);
+    }
+    state.closed = true;
+    state.queue.end();
+  }
+
   /** Make exactly the next start() call reject with `message`, and only the next one. */
   failNextStart(message: string): void {
     this.nextStartError = message;

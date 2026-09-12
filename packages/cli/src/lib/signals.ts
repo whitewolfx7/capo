@@ -36,6 +36,7 @@ export function blockUntilStopped(orchestrator: Orchestrator, dir: string, log: 
       process.off('SIGINT', onStopSignal);
       process.off('SIGTERM', onStopSignal);
       orchestrator.events.off('integration-finished', onIntegrationFinished);
+      orchestrator.events.off('abandoned', onAbandoned);
       clearInterval(keepAlive);
       void clearPidFile(dir).finally(resolve);
     };
@@ -64,10 +65,23 @@ export function blockUntilStopped(orchestrator: Orchestrator, dir: string, log: 
       teardown();
     };
 
+    // Every session is gone with the run unfinished: no result can arrive and
+    // no integration can fire, so there is nothing left to wait for. Exits
+    // non-zero, unlike a run that merely integrated to a `failed` status --
+    // this one never got far enough to produce a result at all.
+    const onAbandoned = (report: { reason: string }): void => {
+      if (stopping) return;
+      stopping = true;
+      log(`run abandoned: ${report.reason}`);
+      process.exitCode = 1;
+      teardown();
+    };
+
     process.on('SIGUSR2', onControlSignal);
     process.on('SIGINT', onStopSignal);
     process.on('SIGTERM', onStopSignal);
     orchestrator.events.once('integration-finished', onIntegrationFinished);
+    orchestrator.events.once('abandoned', onAbandoned);
   });
 }
 

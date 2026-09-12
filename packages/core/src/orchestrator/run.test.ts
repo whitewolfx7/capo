@@ -782,4 +782,38 @@ describe('integration', () => {
     expect(state.get().status).toBe('done');
     for (const task of tasks) expect(state.get().tasks[task.id]!.state).toBe('done');
   });
+  // A live Codex run whose every session failed on an unsupported model kept
+  // reporting "running" forever: nothing watched for the case where there is
+  // no longer anyone left who could finish the work.
+  it('ends the run when every session has died with the work unfinished', async () => {
+    const { orch, state, claude } = await harness();
+    await orch.start();
+
+    const abandoned = withDeadline(once(orch.events, 'abandoned'), 'abandoned');
+    for (const id of ['root', 'team-a', 'team-b']) {
+      claude.emit(id, { kind: 'error', message: 'model not supported', retryable: false });
+    }
+    await settle();
+    for (const id of ['root', 'team-a', 'team-b']) claude.endStream(id);
+
+    const [report] = (await abandoned) as [{ reason: string; failed: string[] }];
+    expect(report.failed.sort()).toEqual(['root', 'team-a', 'team-b']);
+    expect(state.get().status).toBe('failed');
+  });
+
+  it('does not end the run when one session dies but others are still working', async () => {
+    const { orch, state, claude } = await harness();
+    await orch.start();
+
+    claude.endStream('team-b');
+    // The pump records a session's end a few real I/O round-trips after the
+    // stream closes (a state write and a STATUS.md write), so poll on a
+    // timer rather than guessing a number of microtask turns.
+    for (let i = 0; i < 100 && state.get().sessions['team-b']!.status !== 'stopped'; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    expect(state.get().sessions['team-b']!.status).toBe('stopped');
+    expect(state.get().status).toBe('running');
+  });
 });

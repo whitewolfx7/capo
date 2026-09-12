@@ -11,9 +11,12 @@ resting only on fake ones:
 - The run directory, atomic state file, and the Markdown checkpoint format.
 - Git worktrees per task and write-scope enforcement including renames. A
   coordinator that owns exactly one task runs inside that task's worktree.
-  The integration engine (merge accepted results into an integration
-  worktree, run the combined checks) is built and has its own tests, but see
-  below: nothing in a live run calls it yet.
+- The result protocol and integration: a coordinator reports a finished task
+  as a fenced `# Result:` block naming its commit, tasks move
+  `ready` -> `running` -> `review` -> `done`/`failed`, and once every task has
+  reported, accepted results are merged one at a time into an integration
+  worktree and the configured `check_command` runs over the combined tree.
+  When that finishes the run ends and the process exits on its own.
 - The Claude Code and Codex adapters, both satisfying a shared conformance
   suite. Both have now been run against their real CLIs, not only the fake
   one. The Claude Code run found and fixed three real bugs: a repeated
@@ -37,14 +40,15 @@ resting only on fake ones:
   (`plugins/*/capo/dist/capo.mjs`) are committed to the repository rather
   than gitignored, so a fresh checkout has what a marketplace install needs.
 
-**The largest thing not done: a run cannot finish.** Nothing marks a task
-done — every task is created directly in the `ready` state at launch and
-nothing in this codebase ever moves it further (`pending`, `running`,
-`blocked`, `review`, `done`, and `failed` are all declared on `TaskState` but
-unused). The integration engine above is real but is never invoked during a
-run. `capo status` will show every task sitting at `ready` for as long as the
-run lives. The only way a run reaches `done` today is a human stopping it —
-there is no `capo stop` command; it happens on process signal.
+A full run has been watched work end to end on live Codex — two coordinators,
+two worktrees, two results, a merge, a passing combined check, and a clean
+exit. See [notes/first-complete-run.md](notes/first-complete-run.md), which
+also records what that run got wrong.
+
+**The largest thing not done: no real usage limit has ever fired.** Detection,
+checkpoint, switch and relaunch are exercised against captured fixtures and
+real CLI output shapes, never against a live cap — the one scenario CAPO was
+built for.
 
 **Not verified:**
 
@@ -362,17 +366,29 @@ run started from one host and switched from the other.
 
 ## Integration
 
-The design: coordinators report a task done with its worktree commit and test
-evidence, the root merges accepted tasks one at a time into an integration
-worktree, runs the combined checks, and marks the run complete. A
-coordinator's own report should never by itself mark the run done.
+A coordinator reports a task done with its worktree commit and test evidence,
+as a fenced `# Result:` block. CAPO never asks for one — a coordinator sends
+it unprompted whenever the work is finished and committed, so every piece of
+a session's text output is checked for one.
 
-**That is not what happens today.** The merge-and-check engine
-(`packages/core/src/integrate/merge.ts`) exists and is tested in isolation,
-but nothing in a live run calls it: there is no path from a coordinator
-reporting a task done to a task's state actually changing, so integration is
-never triggered and a run's status never becomes `done` on its own. Reaching
-`done` today means a human stops the run.
+A coordinator's own report never by itself marks a task done. CAPO takes from
+it only the two facts the session alone knows — the commit and the evidence
+narrative — and stamps the task id and base commit from its own task table,
+for the same reason a live session once returned a perfectly well-formed
+checkpoint with every identity field blank.
+
+Once every task has reported, CAPO integrates:
+`acceptResult` re-checks each commit against that task's base and declared
+write scope and rejects anything that wrote outside it; surviving results are
+merged one at a time into an integration worktree; `check_command` runs once
+over the combined tree. Merged tasks become `done`, rejections and conflicts
+become `failed`, and the run is `done` only if nothing was rejected, nothing
+conflicted, and the check passed.
+
+The root does not perform any of this. It is mechanical, it belongs to the
+orchestrator, and a root told to do it by hand will do it in the shared
+workspace, outside every write scope — which is exactly what happened the
+first time a run finished.
 
 ## Acceptance demo
 

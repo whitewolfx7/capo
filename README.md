@@ -13,12 +13,15 @@ the entire team, root included, relaunches on the other platform from those
 checkpoints. Two subscriptions you already pay for, one continuous session of
 work.
 
-Status: v0.1. Both platform adapters have now run against their real CLIs,
-not just a stub, and real bugs turned up and got fixed doing it. Two things
-that would make this a finished product are still not true: **a run cannot
-finish on its own** — nothing ever marks a task done, so it takes a human to
-stop one — and no real usage limit has fired yet to prove out the whole
-reason CAPO exists. See [What is not done](#what-is-not-done).
+Status: v0.1. Both platform adapters have run against their real CLIs, not
+just a stub, and a full run has finished end to end on live Codex: two
+coordinators fixed their own bug in their own worktree, reported results,
+and CAPO merged both, ran the combined check, and exited on its own — see
+[docs/notes/first-complete-run.md](docs/notes/first-complete-run.md). One
+thing that would make this a finished product is still unproven: **no real
+usage limit has ever fired**, which is the whole reason CAPO exists. Every
+limit path is exercised against captured fixtures, not a live cap. See
+[What is not done](#what-is-not-done).
 
 ## How it works
 
@@ -199,15 +202,21 @@ coordinator assigned exactly one task runs inside that task's worktree; one
 assigned more than one still runs in the shared workspace instead, because
 isolation for that case isn't built yet.
 
-CAPO can independently check a diff against a task's write scope, including
-files moved out of it by a rename, and can merge accepted results one at a
-time into an integration worktree and run the combined checks there. **Both
-exist and are tested, and neither runs automatically today.** Nothing calls
-them during a live run: a coordinator has no way to tell CAPO a task is done,
-so no task ever leaves its initial `ready` state and integration never fires.
-A coordinator saying it finished does not make a run successful — but
-nothing else currently makes one successful either. The only thing that ends
-a run today is a human stopping it.
+A coordinator reports a finished task by sending a fenced `# Result:` block
+naming its commit — unprompted, whenever the work is done. CAPO never asks
+for one. A task moves `ready` -> `running` -> `review` -> `done`/`failed`,
+and once every task has reported, the run integrates: each submitted commit
+is re-checked against that task's declared write scope (including files moved
+out of it by a rename), accepted results are merged one at a time into an
+integration worktree, and `check_command` runs over the combined tree. A
+rejected scope, a conflict, or a failing check fails that task and the run.
+
+**A coordinator saying it finished does not make a task done.** Its report is
+a claim; the scope check and the merge are what settle it. The root does not
+perform integration either — CAPO does it mechanically, and the root's job is
+judging whether the work meets the objective.
+
+When integration finishes, the run ends and the process exits on its own.
 
 CAPO commits with your own git identity and your own signing configuration. It
 will tell you if git has no identity configured rather than inventing one.
@@ -227,16 +236,18 @@ The host conversation is a control panel. It is never the root session.
 
 ## What is not done
 
-**A run cannot finish.** No coordinator has any way to signal a task is done.
-A task's state is set once, at launch, and never advances past `ready` —
-`capo status` will show every task sitting there for the life of the run. The
-integration engine (merge into an integration worktree, run the combined
-checks) is built and has its own tests, but a live run never calls it. Today
-the only way a run reaches `done` is a human stopping it. This is the biggest
-gap in v0.1 and the one closest to making the rest of this document's claims
-actually true end to end.
+**No real usage limit has ever fired.** Limit detection, the checkpoint, the
+switch and the relaunch are all exercised against captured fixtures and real
+CLI output shapes, never against a live cap. This is the one remaining claim
+in this README that has not been watched happen, and it is the reason CAPO
+exists.
 
-Also not done, and known since before today:
+**A platform switch mid-task has not been run end to end.** A switch has been
+driven by hand on a live run and the checkpoints round-tripped, but no run
+has yet been switched mid-task and then carried through to a finished,
+integrated result on the other platform.
+
+Also not done:
 
 - Moving a single task between platforms while the rest of the team keeps
   running. v0.1 moves the whole team at once.
@@ -254,10 +265,12 @@ Found today, while running both adapters for real:
 - A coordinator assigned more than one task still runs in the shared
   workspace instead of an isolated worktree. Only the one-task-per-coordinator
   case is isolated.
-- `roles/worker.md` and the worker model column in `models:` are validated by
-  config and handed to each coordinator to relay, but CAPO never spawns a
-  worker itself — coordinators do, using their host's native subagent
-  mechanism — so nothing here actually exercises that path.
+- CAPO never spawns a worker itself; coordinators do, using their host's
+  native subagent mechanism. `roles/worker.md` and the worker model column in
+  `models:` are handed to each coordinator to relay, which means the model
+  choice is a request CAPO cannot enforce. A live Codex coordinator did
+  delegate to a real worker and check its commit before reporting, so the
+  path works — but nothing verifies which model the worker actually ran as.
 - Installing straight from GitHub with no local clone should work now that
   the built plugin bundles are committed to the repository instead of
   gitignored, but nobody has run that path end to end yet.
@@ -297,9 +310,11 @@ design in [docs/roadmap.md](docs/roadmap.md), and the build plan in
 See [CONTRIBUTING.md](CONTRIBUTING.md). The one rule worth reading before you
 touch an adapter: a stub proves almost nothing here, and
 [docs/notes/codex-live-findings.md](docs/notes/codex-live-findings.md) and
-[docs/notes/claude-live-findings.md](docs/notes/claude-live-findings.md) explains
+[docs/notes/claude-live-findings.md](docs/notes/claude-live-findings.md) explain
 why in detail — a single live Codex run found eight real defects in code that
-had 220 passing tests against the stub. The Claude Code adapter has since had
+had 220 passing tests against the stub, and the first run that finished end to
+end ([docs/notes/first-complete-run.md](docs/notes/first-complete-run.md))
+found two more that every test in the suite was blind to. The Claude Code adapter has since had
 its own live run too (see the header comment in
 `packages/core/src/adapters/claude.ts`), which found and fixed three more:
 a spuriously repeated `ready` event, a swallowed failed turn, and usage-limit

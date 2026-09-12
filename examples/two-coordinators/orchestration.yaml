@@ -53,6 +53,14 @@ tasks:
 #     supervised run will stop rather than make changes.
 autonomy: autonomous
 
+# The combined check, run once over the fully integrated tree after every
+# task's result has merged. argv, not a shell string -- no shell is involved,
+# so `&&`, globs and redirection will not work here. If it fails, every task
+# that merged is marked failed: the pieces fit individually but not together.
+# Optional. Omitted (the default), integration accepts a clean merge on its
+# own with nothing further to check.
+check_command: ["node", "--test", "src/component-a/add.test.mjs", "src/component-b/multiply.test.mjs"]
+
 transcripts: true
 
 # How long a live session can emit zero events before CAPO marks it

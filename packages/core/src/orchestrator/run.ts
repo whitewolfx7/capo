@@ -649,6 +649,63 @@ export class Orchestrator {
     } catch (err) {
       this.#log(`[${sessionId}] pump error: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    // The stream is over, so this session is over: an adapter only ends it on
+    // `close()`. Guarded on the session object rather than the id, because a
+    // switch closes a session and relaunches under the same id -- an old
+    // pump finishing after its replacement is live must not touch the new
+    // session's bookkeeping.
+    const current = this.#live.get(sessionId);
+    if (current?.session !== session) return;
+
+    this.#live.delete(sessionId);
+    this.#lastEventAt.delete(sessionId);
+    this.#stalledSet.delete(sessionId);
+    // `#pump` is started with `void`, so nothing is awaiting it: an
+    // exception escaping here is an unhandled rejection that takes the whole
+    // orchestrator down. The most likely cause is benign -- the run
+    // directory going away underneath a session that outlived it -- and none
+    // of it is worth crashing a run over.
+    try {
+      await this.#update((draft) => {
+        const record = draft.sessions[sessionId];
+        if (record && record.status !== 'failed') record.status = 'stopped';
+      });
+      await this.#maybeAbandon();
+    } catch (err) {
+      this.#log(
+        `[${sessionId}] could not record session end: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Ends a run that has nothing left alive to finish it. A session dying is
+   * not by itself fatal -- the others may still be working, and a switch
+   * closes every session on purpose -- but once the last one is gone with
+   * the run still nominally in progress, no result can ever arrive and no
+   * integration can ever fire. Without this the process sits on its
+   * keepalive forever: a live Codex run whose sessions all failed on an
+   * unsupported model did exactly that, reporting "running" indefinitely.
+   */
+  async #maybeAbandon(): Promise<void> {
+    if (this.#switching || this.#integrating) return;
+    if (this.#live.size > 0) return;
+    const state = this.#state.get();
+    if (state.status !== 'running') return;
+
+    const sessions = Object.values(state.sessions);
+    if (sessions.length === 0) return;
+
+    const failed = sessions.filter((s) => s.status === 'failed').map((s) => s.id);
+    await this.#update((draft) => {
+      draft.status = 'failed';
+    });
+    this.#stopStallWatch();
+
+    const detail = failed.length > 0 ? `session(s) failed: ${failed.join(', ')}` : 'every session ended';
+    this.#log(`run abandoned: ${detail}; nothing left to finish it`);
+    this.events.emit('abandoned', { reason: detail, failed });
   }
 
   async #onEvent(sessionId: SessionId, platform: PlatformId, event: AdapterEvent): Promise<void> {

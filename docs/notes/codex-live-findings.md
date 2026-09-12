@@ -54,24 +54,111 @@ So the example config would have failed on a user's first run. Model names are
 now placeholders with a note to check them against your own account using
 `codex exec -m <model> "hi"`.
 
+## 5. The system prompt was never sent
+
+`codex exec` has no `--append-system-prompt`. Its PROMPT argument is documented
+as "initial instructions for the agent" and is the only input channel. The
+adapter passed only `opts.prompt` and dropped `opts.systemPrompt` entirely.
+
+A live session replied:
+
+> No concrete objective appears in the visible request.
+
+The system prompt carries the objective, role instructions, write scope and the
+checkpoint protocol. Without it no Codex session could ever have survived a
+platform switch. The system prompt is now prepended to the first turn. The same
+agent then said it would "minimally fix only `src/a/`".
+
+## 6. Task branches collided between runs
+
+Branches were named `capo/<task-id>` and outlive `.capo/`. A second run, or a
+retry after a failure, died on `fatal: a branch named 'capo/task-a' already
+exists` before launching anything. They are now `capo/<run-id>/<task-id>`.
+
+## 7. A real agent's checkpoint had no metadata
+
+This is the big one, and it only appeared because a real switch was forced
+against a real agent mid-task.
+
+The agent produced a well-formed, parseable checkpoint. Every narrative section
+was sensible. Every header field was blank:
+
+```
+# Checkpoint: team-a
+run:
+role:
+platform:
+written:
+base_commit:
+```
+
+It parsed cleanly and was written to disk carrying no identity, which would
+have made a resume attribute the work to nothing.
+
+The agent was not misbehaving. A session has no reliable way to know its run id
+or the base commit. Asking it to restate them invites a confident wrong answer.
+CAPO now stamps all metadata itself and discards whatever the session claimed:
+the session supplies the narrative, CAPO supplies the facts.
+
+## 8. Agents stall on approval, and nothing notices
+
+A real coordinator correctly diagnosed its bug, then ended its turn with:
+
+> This is bounded: change `add` from subtraction to addition, then verify with
+> Node; approve?
+
+It then sat idle. CAPO has no approval channel. `docs/architecture.md` claims
+"Approvals and questions from any session are surfaced in the CAPO terminal";
+that is not implemented. Today a real Codex agent stalls on the first action
+needing permission and the run quietly stops making progress.
+
+This is the largest known gap. Options are to run Codex with approvals
+bypassed, which has obvious risk, or to surface approval requests and let a
+person answer them.
+
+## What a live run confirmed works
+
+- Sessions start and become ready from the real `thread.started` event.
+- Assistant text and tool calls stream into transcripts in real time.
+- Plugin warnings arriving as error items are correctly non-fatal.
+- **A real Codex agent, given the protocol, produces a checkpoint that
+  `parseCheckpoint` reads.** This was the single biggest unverified assumption
+  in the project.
+- A forced switch checkpointed all three live sessions, wrote set `001`, and
+  moved the team.
+
 ## Still unverified
 
 A successful Codex turn has never been captured, because the account's model
 needs a newer CLI than 0.147.0. So:
 
-- `turn.completed` is inferred, not observed.
-- The `item.type` for assistant prose is inferred. The mapper matches
-  permissively (`/message|agent|assistant|text/`) rather than pinning a name.
+- ~~`turn.completed` is inferred~~ Observed. It carries a `usage` object with
+  input, cached input, output and reasoning token counts.
+- ~~The `item.type` for assistant prose is inferred~~ Observed: `agent_message`
+  with the prose in `text`. The permissive matcher handled it correctly.
 - The usage-limit shape is still unknown. Detection is message-pattern based
   (`/usage limit|rate limit|quota exceeded|too many requests/`), which will
-  catch a limit reported as text but would miss a dedicated event type.
+  catch a limit reported as text but would miss a dedicated event type. Hitting
+  a real limit is the only way to settle it.
 
 Limit detection remains the single highest-risk unverified thing in CAPO, and
 it is the feature the whole product exists for.
 
+## Model names
+
+`gpt-5.6` is not a model. The real ones are listed in
+`~/.codex/models_cache.json`. On this account: `gpt-6-astra` (needs a newer CLI
+than 0.147.0), `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+`gpt-5.3-codex-spark`. `gpt-5.6-sol` works. `gpt-5-codex` does not exist for a
+ChatGPT account.
+
 ## The lesson
 
-The Claude Code adapter is in the same position: written against a stub, never
-run against the real CLI. Its schema was at least taken from documented
-`stream-json` output rather than invented, but it has not been proven either.
-A live run is worth more than any amount of stub testing.
+Eight defects, all found by one live run, in code that had 220 passing tests.
+Six of them were invisible to any amount of stub testing, because the stub
+encoded the same wrong assumptions as the adapter.
+
+The Claude Code adapter is still in that position: written against a stub,
+never run against the real CLI. Its schema at least came from documented
+`stream-json` output rather than invention, but on this evidence that is not
+much reassurance.

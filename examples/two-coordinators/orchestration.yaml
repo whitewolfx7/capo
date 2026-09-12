@@ -1,0 +1,47 @@
+version: 1
+workspace: .
+objective: ./context/GOAL.md
+
+platforms:
+  claude:
+    driver: claude-code
+  codex:
+    driver: codex
+
+start_on: claude
+
+models:            # role -> platform -> model
+  root:
+    claude: opus
+    codex: gpt-5-codex
+  coordinator:
+    claude: sonnet
+    codex: gpt-5-codex-mini
+  worker:
+    claude: haiku
+    codex: gpt-5-codex-mini
+
+roles:
+  root: ./roles/root.md
+  coordinator: ./roles/coordinator.md
+  worker: ./roles/worker.md
+
+context:
+  - ./context/PROJECT.md
+
+coordinators:
+  - id: team-a
+  - id: team-b
+
+tasks:
+  - id: component-a
+    coordinator: team-a
+    brief: ./tasks/component-a.md
+    write_scope: [src/component-a/]
+  - id: component-b
+    coordinator: team-b
+    brief: ./tasks/component-b.md
+    write_scope: [src/component-b/]
+
+limits:
+  max_workers_per_coordinator: 2

@@ -554,16 +554,24 @@ describe('stall watchdog', () => {
   });
 
   it('never flags a session that keeps emitting events', async () => {
-    const { orch, claude, state } = await harness(undefined, { stallTimeoutMs: 40, stallPollMs: 5 });
+    // The margin between the poke interval and the timeout has to be wider
+    // than ordinary scheduling jitter, or this test fails on a loaded
+    // machine for reasons that have nothing to do with the watchdog: at a
+    // 40ms timeout with 10ms pokes, one slow `setTimeout` on a busy CI
+    // runner is enough to trip it. A 10x margin needs a 200ms stall to
+    // produce a false positive. The loop still runs for longer than the
+    // timeout, so a watchdog that ignored events entirely would still fire.
+    const { orch, claude, state } = await harness(undefined, { stallTimeoutMs: 200, stallPollMs: 20 });
     await orch.start();
 
-    const until = Date.now() + 150;
+    const until = Date.now() + 600;
     while (Date.now() < until) {
       claude.emit('root', { kind: 'tool', name: 'poke' });
-      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 20));
+      // Checked every pass, not only at the end: a flag that was raised and
+      // then cleared by the next poke would otherwise go unnoticed.
+      expect(state.get().sessions['root']?.stalled).not.toBe(true);
     }
-
-    expect(state.get().sessions['root']?.stalled).not.toBe(true);
   });
 });
 

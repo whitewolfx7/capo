@@ -165,7 +165,16 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })));
+  // An orchestrator left running keeps pumping events and writing state.json
+  // into the directory about to be removed, which races the rm and fails it
+  // with ENOTEMPTY. Calling stop() here would be tidier but runs a full
+  // checkpoint round per test, taking the suite from 3s to 33s. Letting
+  // in-flight writes land and retrying the removal costs nothing and fixes
+  // the flake.
+  await settle();
+  await Promise.all(
+    dirs.map((d) => rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 })),
+  );
 });
 
 describe('Orchestrator', () => {

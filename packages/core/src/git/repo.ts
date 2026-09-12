@@ -60,10 +60,62 @@ export async function removeWorktree(repo: string, path: string): Promise<void> 
   await git(repo, ['worktree', 'prune']);
 }
 
-export async function commitAll(repo: string, message: string): Promise<string | undefined> {
+/**
+ * A git author identity. Tests pass one so they do not depend on the
+ * developer's global config; production passes nothing.
+ */
+export interface GitIdentity {
+  name: string;
+  email: string;
+}
+
+/**
+ * Builds the `-c` flags for a commit.
+ *
+ * With no identity, this returns nothing and git uses the user's OWN config.
+ * That is deliberate: CAPO commits into a real repository the user owns, and
+ * stamping its own name on their history, or silently turning off commit
+ * signing for someone who requires it, would be a surprise they never asked
+ * for.
+ */
+export function identityArgs(identity?: GitIdentity): string[] {
+  if (!identity) return [];
+  return [
+    '-c', `user.email=${identity.email}`,
+    '-c', `user.name=${identity.name}`,
+    '-c', 'commit.gpgsign=false',
+  ];
+}
+
+/** Git's complaint when it has no identity configured anywhere. */
+const NO_IDENTITY = /Please tell me who you are|unable to auto-detect email address|empty ident name/i;
+
+/**
+ * Stages everything and commits. Returns the new sha, or undefined when there
+ * was nothing to commit.
+ *
+ * @param identity optional; omit it in production so the user's own git
+ *                 identity and signing configuration are used.
+ */
+export async function commitAll(
+  repo: string,
+  message: string,
+  identity?: GitIdentity,
+): Promise<string | undefined> {
   await git(repo, ['add', '-A']);
   if (await isClean(repo)) return undefined;
-  await git(repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-m', message]);
+  try {
+    await git(repo, [...identityArgs(identity), 'commit', '-m', message]);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (NO_IDENTITY.test(detail)) {
+      throw new CapoError(
+        `git has no author identity configured in ${repo}`,
+        'set one with: git config --global user.email "you@example.com" && git config --global user.name "Your Name"',
+      );
+    }
+    throw err;
+  }
   return headCommit(repo);
 }
 

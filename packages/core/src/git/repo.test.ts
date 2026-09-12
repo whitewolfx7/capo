@@ -18,7 +18,13 @@ let dir: string;
 
 async function initRepo(): Promise<string> {
   const repo = await mkdtemp(join(tmpdir(), 'capo-repo-'));
+  // -b main because the default branch name varies by git version and config.
   await git(repo, ['init', '-b', 'main']);
+  // Configure identity ON THE TEST REPO rather than relying on the developer's
+  // global config, so the suite passes on a clean machine and on CI.
+  await git(repo, ['config', 'user.email', 't@t']);
+  await git(repo, ['config', 'user.name', 't']);
+  await git(repo, ['config', 'commit.gpgsign', 'false']);
   return repo;
 }
 
@@ -225,5 +231,60 @@ describe('git()', () => {
     // no assertion needed beyond "did not throw and did not execute injected command"
     expect(paths).toEqual([]);
     await rm(repo, { recursive: true, force: true });
+  });
+});
+
+describe('commitAll identity', () => {
+  let r: string;
+
+  beforeEach(async () => { r = await initRepo(); });
+  afterEach(async () => { await rm(r, { recursive: true, force: true }); });
+
+  it("uses the repository's own configured identity when none is passed", async () => {
+    await writeFile(join(r, 'a.txt'), 'a');
+    const sha = await commitAll(r, 'first');
+    expect(await git(r, ['log', '-1', '--format=%an <%ae>', sha!])).toBe('t <t@t>');
+  });
+
+  it('uses an explicitly passed identity over the repository config', async () => {
+    await writeFile(join(r, 'a.txt'), 'a');
+    const sha = await commitAll(r, 'first', { name: 'Someone', email: 'someone@example.com' });
+    expect(await git(r, ['log', '-1', '--format=%an <%ae>', sha!]))
+      .toBe('Someone <someone@example.com>');
+  });
+
+  it('fails with an actionable hint when git has no identity it may use', async () => {
+    // CAPO commits into the user's real repository. Committing as a made-up
+    // author, rather than reporting the missing identity, would quietly put
+    // junk in their history.
+    //
+    // Producing a genuinely identity-less git needs BOTH: useConfigOnly stops
+    // git inventing one from the username and hostname, and the env vars stop
+    // it reading the developer's global and system config.
+    await git(r, ['config', '--unset', 'user.email']);
+    await git(r, ['config', '--unset', 'user.name']);
+    await git(r, ['config', 'user.useConfigOnly', 'true']);
+    await writeFile(join(r, 'a.txt'), 'a');
+
+    const saved = {
+      global: process.env['GIT_CONFIG_GLOBAL'],
+      system: process.env['GIT_CONFIG_SYSTEM'],
+    };
+    process.env['GIT_CONFIG_GLOBAL'] = '/dev/null';
+    process.env['GIT_CONFIG_SYSTEM'] = '/dev/null';
+    try {
+      await expect(commitAll(r, 'nope')).rejects.toThrow(/no author identity/i);
+      await expect(commitAll(r, 'nope')).rejects.toMatchObject({
+        hint: expect.stringContaining('git config'),
+      });
+    } finally {
+      for (const [key, value] of [
+        ['GIT_CONFIG_GLOBAL', saved.global],
+        ['GIT_CONFIG_SYSTEM', saved.system],
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });

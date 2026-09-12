@@ -1,0 +1,20 @@
+{
+  "name": "capo-monorepo",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20.0.0" },
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --build --force",
+    "build:plugins": "node scripts/build-plugins.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

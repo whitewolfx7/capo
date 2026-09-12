@@ -47,32 +47,17 @@ export async function addWorktree(repo: string, path: string, branch: string, ba
   await git(repo, ['worktree', 'add', '-b', branch, path, base]);
 }
 
+/** Swallowed: the path is already gone, so there is nothing left to remove. */
+const ALREADY_GONE = [/is not a working tree/, /No such file or directory/];
+
 export async function removeWorktree(repo: string, path: string): Promise<void> {
   try {
     await git(repo, ['worktree', 'remove', '--force', path]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (!message.includes('is not a working tree')) {
-      // Path may simply not exist as a worktree at all (e.g. already removed).
-      // Fall through to prune regardless, but only swallow known "not a worktree" cases
-      // or a path that never existed.
-      if (!message.includes('No such file or directory') && !message.includes("is not a working tree")) {
-        // Re-throw anything unexpected so real failures are still visible.
-        if (!(await pathLooksAlreadyGone(message))) {
-          throw err;
-        }
-      }
-    }
+    if (!ALREADY_GONE.some(re => re.test(message))) throw err;
   }
   await git(repo, ['worktree', 'prune']);
-}
-
-async function pathLooksAlreadyGone(message: string): Promise<boolean> {
-  return (
-    message.includes('is not a working tree') ||
-    message.includes('No such file or directory') ||
-    message.includes('not a working tree')
-  );
 }
 
 export async function commitAll(repo: string, message: string): Promise<string | undefined> {

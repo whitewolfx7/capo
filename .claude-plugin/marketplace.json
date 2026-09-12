@@ -1,18 +1,33 @@
 {
   "name": "capo",
   "owner": {
-    "name": "CAPO"
+    "name": "CAPO",
+    "url": "https://github.com/whitewolfx7/capo"
   },
-  "metadata": {
-    "description": "Run one AI agent team across Claude Code and Codex, switching platforms on a usage limit.",
-    "version": "0.1.0"
-  },
+  "description": "Run one AI agent team across Claude Code and Codex, switching platforms on a usage limit.",
+  "version": "0.1.0",
   "plugins": [
     {
       "name": "capo",
       "description": "Move an agent team to your other AI platform when one runs out of usage quota.",
       "version": "0.1.0",
-      "source": "./plugins/claude/capo"
+      "source": "./plugins/claude/capo",
+      "category": "orchestration",
+      "keywords": [
+        "orchestration",
+        "multi-agent",
+        "usage-limit",
+        "codex",
+        "claude-code",
+        "failover"
+      ],
+      "author": {
+        "name": "CAPO contributors",
+        "url": "https://github.com/whitewolfx7/capo"
+      },
+      "homepage": "https://github.com/whitewolfx7/capo",
+      "repository": "https://github.com/whitewolfx7/capo",
+      "license": "MIT"
     }
   ]
 }

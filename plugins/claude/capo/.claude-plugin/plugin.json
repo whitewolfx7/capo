@@ -1,15 +1,21 @@
 {
   "name": "capo",
+  "displayName": "CAPO",
   "version": "0.1.0",
   "description": "Run one AI agent team across Claude Code and Codex. When the active platform hits its usage limit, CAPO checkpoints the whole team and continues on the other one.",
   "author": {
-    "name": "CAPO contributors"
+    "name": "CAPO contributors",
+    "url": "https://github.com/whitewolfx7/capo"
   },
+  "homepage": "https://github.com/whitewolfx7/capo",
+  "repository": "https://github.com/whitewolfx7/capo",
   "license": "MIT",
   "keywords": [
     "orchestration",
     "multi-agent",
     "usage-limit",
-    "codex"
+    "codex",
+    "claude-code",
+    "failover"
   ]
 }

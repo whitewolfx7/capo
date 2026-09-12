@@ -18,6 +18,15 @@
  * out of scope for v0.1; `start()` throws for it. When it is implemented,
  * its types should come from `codex app-server generate-ts`, not be
  * hand-written.
+ *
+ * Autonomy (verified against `codex exec --help`, codex-cli 0.154.0): with no
+ * extra flags, `codex exec` still routes some approval requests through
+ * whatever policy the user's own `~/.codex/config.toml` sets, and a headless
+ * run has nobody there to answer them. A real coordinator hit exactly this:
+ * it correctly diagnosed a one-line fix, ended its turn asking "approve?",
+ * and then sat there forever, because in `exec` mode there is no channel for
+ * a "yes" to arrive on. See `autonomyFlags` for the fix and why it is safe to
+ * offer here specifically.
  */
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
@@ -27,6 +36,7 @@ import { CapoError } from '../types.js';
 import type {
   AdapterEvent,
   AdapterSession,
+  AutonomyLevel,
   DoctorResult,
   PlatformAdapter,
   PlatformId,
@@ -128,6 +138,42 @@ function execCapture(
   });
 }
 
+/**
+ * Maps `CapoConfig.autonomy` onto the `codex exec` flags that give it effect.
+ * `undefined` (an adapter constructed against an older `StartSessionOptions`,
+ * or a caller that never set it) is treated the same as "supervised".
+ *
+ * "supervised" adds nothing: whatever `codex exec` and the user's own
+ * `~/.codex/config.toml` would otherwise do, unchanged. This is the config
+ * default (`autonomy: 'supervised'` in `orchestration.yaml`), deliberately:
+ * CAPO does not widen what a session can do on a real repository unless the
+ * person running it asks for that.
+ *
+ * "autonomous" adds `--approve-for-me`, which (per `codex exec --help`)
+ * "route[s] approval requests through automatic review using the
+ * workspace-write sandbox" instead of blocking on an interactive answer that,
+ * in a headless `exec` process, can never come. This is NOT
+ * `--dangerously-bypass-approvals-and-sandbox`: the session still runs inside
+ * the workspace-write sandbox, its approval requests are reviewed rather than
+ * rubber-stamped, and it is still just one Codex CLI flag away from a human
+ * being asked, not zero. It is defensible as a config *choice* (never
+ * hardcoded on) specifically in CAPO because of what already surrounds it:
+ * every task runs in its own git worktree (`git/repo.ts#addWorktree`),
+ * confined to a write scope declared in `orchestration.yaml`, and
+ * `integrate/merge.ts#acceptResult` independently re-checks a submitted diff
+ * against that scope before anything reaches the real branch — so a session
+ * that never has to stop and ask can still only ever touch its own corner of
+ * the repository, and even that is checked again on the way out.
+ */
+function autonomyFlags(level: AutonomyLevel | undefined): string[] {
+  switch (level ?? 'supervised') {
+    case 'autonomous':
+      return ['--approve-for-me'];
+    case 'supervised':
+      return [];
+  }
+}
+
 class CodexAdapterSession implements AdapterSession {
   readonly sessionId: SessionId;
   platformSessionId: string | undefined;
@@ -150,6 +196,12 @@ class CodexAdapterSession implements AdapterSession {
   /** Chains turns so a later send() never spawns its child until the
    * previous turn's child has fully finished. */
   private turnChain: Promise<void> = Promise.resolve();
+  /**
+   * Set once, from `begin()`'s `opts.autonomy`, and reused by every later
+   * `send()`: a session's autonomy doesn't change mid-run, and `send()` never
+   * sees a fresh `StartSessionOptions` to read it from again.
+   */
+  private autonomyArgs: string[] = [];
 
   constructor(executable: string, extraArgs: string[], sessionId: SessionId, cwd: string) {
     this.executable = executable;
@@ -161,6 +213,8 @@ class CodexAdapterSession implements AdapterSession {
   /** Spawns the first turn and resolves once its session-configured event
    * has arrived and `platformSessionId` is set — not once the turn ends. */
   begin(opts: StartSessionOptions): Promise<void> {
+    this.autonomyArgs = autonomyFlags(opts.autonomy);
+
     // `codex exec` has no --append-system-prompt: its PROMPT argument is
     // documented as "initial instructions for the agent" and is the only
     // input channel. So the system prompt is prepended to the first turn.
@@ -171,7 +225,12 @@ class CodexAdapterSession implements AdapterSession {
     // real Codex sessions replying "no concrete objective appears in the
     // visible request" — and, worse, with no knowledge of the checkpoint
     // protocol they could never have survived a platform switch.
-    const args = ['exec', '--json', '-m', opts.model, composeFirstTurn(opts)];
+    //
+    // The autonomy flags (if any) land right after `exec`: `codex exec`
+    // parses `-s`/`--approve-for-me` at that level whether or not a `resume`
+    // subcommand follows (verified with `codex exec --approve-for-me resume
+    // --help`), so the same placement works unchanged in send() below too.
+    const args = ['exec', ...this.autonomyArgs, '--json', '-m', opts.model, composeFirstTurn(opts)];
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       const onReady = (): void => {
@@ -198,7 +257,7 @@ class CodexAdapterSession implements AdapterSession {
         `codex adapter: cannot send to session "${this.sessionId}": no platform session id yet`,
       );
     }
-    const args = ['exec', 'resume', this.platformSessionId, '--json', text];
+    const args = ['exec', ...this.autonomyArgs, 'resume', this.platformSessionId, '--json', text];
 
     let resolveSpawned: (() => void) | undefined;
     const spawned = new Promise<void>((resolve) => {

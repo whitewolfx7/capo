@@ -11465,7 +11465,24 @@ var configFileSchema = external_exports.object({
   // watching a run notices well before "is it stuck?" becomes "did I lose
   // an hour to this?".
   stall_timeout_ms: external_exports.number().int().positive().default(3e5),
-  autonomy: external_exports.enum(["supervised", "autonomous"]).default("supervised"),
+  // Defaults to 'autonomous' because CAPO runs sessions HEADLESS: there is
+  // nobody present to answer an approval request, so a supervised run simply
+  // stalls. That is the exact bug this setting was added to fix, and a
+  // default that reproduces it fixes nothing.
+  //
+  // This is not a permissiveness increase for Claude Code, which CAPO has
+  // always launched with --permission-mode acceptEdits. It brings Codex up to
+  // the same footing via --approve-for-me, which keeps the workspace-write
+  // sandbox, rather than --dangerously-bypass-approvals-and-sandbox.
+  //
+  // What makes that defensible: every task runs in its own git worktree, not
+  // the user's working tree; every task declares a write scope; and
+  // integrate/merge.ts re-checks each submitted diff against that scope,
+  // renames included, before anything is integrated.
+  //
+  // Set `autonomy: supervised` for a dry run: sessions read and plan but do
+  // not write.
+  autonomy: external_exports.enum(["supervised", "autonomous"]).default("autonomous"),
   limits: external_exports.object({
     max_workers_per_coordinator: external_exports.number().int().positive().default(2)
   }).strict().default({})
@@ -12367,6 +12384,12 @@ var USAGE_LIMIT_RE = /usage limit reached/i;
 function extractResetAt(text) {
   return parseResetAt(text);
 }
+function resetsAtToIso(value) {
+  if (typeof value !== "number" || !Number.isFinite(value))
+    return void 0;
+  const d = new Date(value * 1e3);
+  return Number.isNaN(d.getTime()) ? void 0 : d.toISOString();
+}
 function mapLine(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return [];
@@ -12404,8 +12427,24 @@ function mapLine(value) {
     }
     return events;
   }
+  if (obj.type === "rate_limit_event") {
+    const info = obj.rate_limit_info;
+    const status = info?.status;
+    if (status !== "rejected")
+      return [];
+    const rateLimitType = typeof info?.rateLimitType === "string" ? info.rateLimitType : "unknown";
+    const resetAt = resetsAtToIso(info?.resetsAt);
+    const raw = `claude-code rate limit rejected (${rateLimitType})${resetAt !== void 0 ? ` resets at ${resetAt}` : ""}`;
+    return [resetAt !== void 0 ? { kind: "usage-limit", raw, resetAt } : { kind: "usage-limit", raw }];
+  }
   if (obj.type === "result") {
-    return [{ kind: "turn-end" }];
+    const events = [];
+    if (obj.is_error === true) {
+      const message = typeof obj.result === "string" && obj.result.length > 0 ? obj.result : "claude-code: turn ended with an error";
+      events.push({ kind: "error", message, retryable: false });
+    }
+    events.push({ kind: "turn-end" });
+    return events;
   }
   return [];
 }
@@ -12476,7 +12515,7 @@ var ClaudeAdapter = class {
       "--append-system-prompt",
       opts.systemPrompt,
       "--permission-mode",
-      "acceptEdits"
+      permissionMode(opts.autonomy)
     ];
     const child = spawn(this.executable, args, {
       cwd: opts.cwd,
@@ -12519,9 +12558,11 @@ var ClaudeAdapter = class {
         }
         for (const event of mapLine(line.value)) {
           if (event.kind === "ready") {
-            platformSessionId = event.platformSessionId;
-            queue.push(event);
-            resolveReady?.();
+            if (platformSessionId === void 0) {
+              platformSessionId = event.platformSessionId;
+              queue.push(event);
+              resolveReady?.();
+            }
           } else {
             queue.push(event);
           }
@@ -12593,6 +12634,9 @@ var ClaudeAdapter = class {
     return session;
   }
 };
+function permissionMode(level) {
+  return (level ?? "autonomous") === "supervised" ? "plan" : "acceptEdits";
+}
 
 // packages/core/dist/adapters/codex.js
 import { spawn as spawn2 } from "node:child_process";
@@ -12661,6 +12705,14 @@ function execCapture(executable, args) {
     child.on("close", (code) => resolve4({ code, stdout, stderr }));
   });
 }
+function autonomyFlags(level) {
+  switch (level ?? "supervised") {
+    case "autonomous":
+      return ["--approve-for-me"];
+    case "supervised":
+      return [];
+  }
+}
 var CodexAdapterSession = class {
   sessionId;
   platformSessionId;
@@ -12681,6 +12733,12 @@ var CodexAdapterSession = class {
   /** Chains turns so a later send() never spawns its child until the
    * previous turn's child has fully finished. */
   turnChain = Promise.resolve();
+  /**
+   * Set once, from `begin()`'s `opts.autonomy`, and reused by every later
+   * `send()`: a session's autonomy doesn't change mid-run, and `send()` never
+   * sees a fresh `StartSessionOptions` to read it from again.
+   */
+  autonomyArgs = [];
   constructor(executable, extraArgs, sessionId, cwd) {
     this.executable = executable;
     this.extraArgs = extraArgs;
@@ -12690,7 +12748,8 @@ var CodexAdapterSession = class {
   /** Spawns the first turn and resolves once its session-configured event
    * has arrived and `platformSessionId` is set — not once the turn ends. */
   begin(opts) {
-    const args = ["exec", "--json", "-m", opts.model, composeFirstTurn(opts)];
+    this.autonomyArgs = autonomyFlags(opts.autonomy);
+    const args = ["exec", ...this.autonomyArgs, "--json", "-m", opts.model, composeFirstTurn(opts)];
     return new Promise((resolve4, reject) => {
       let settled = false;
       const onReady = () => {
@@ -12715,7 +12774,7 @@ var CodexAdapterSession = class {
     if (!this.platformSessionId) {
       throw new Error(`codex adapter: cannot send to session "${this.sessionId}": no platform session id yet`);
     }
-    const args = ["exec", "resume", this.platformSessionId, "--json", text];
+    const args = ["exec", ...this.autonomyArgs, "resume", this.platformSessionId, "--json", text];
     let resolveSpawned;
     const spawned = new Promise((resolve4) => {
       resolveSpawned = resolve4;
@@ -13110,6 +13169,25 @@ function renderEvent(event) {
       return void 0;
   }
 }
+function renderStallNotice(timeoutMs, autonomy) {
+  const seconds = Math.round(timeoutMs / 1e3);
+  const lines = [
+    "",
+    `> **STALLED** at ${(/* @__PURE__ */ new Date()).toISOString()}: no events for over ${seconds}s.`,
+    "> Not necessarily a problem: this session may be deep in a slow tool call,",
+    "> or waiting on an answer from a human that never arrives. CAPO will not",
+    "> act on this by itself \u2014 it is only visible here, in `capo status`, and",
+    "> in STATUS.md so a person can decide."
+  ];
+  if (autonomy === "supervised") {
+    lines.push(">", "> This run is `autonomy: supervised`, so sessions may act only in a", "> read-and-plan capacity and will stop to ask before writing anything.", "> Nobody is present to answer. If you meant this run to do work, set", "> `autonomy: autonomous` in the config and resume.");
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+function renderStallClearedNotice() {
+  return ["", `> _stall cleared at ${(/* @__PURE__ */ new Date()).toISOString()}: events are flowing again._`, ""].join("\n");
+}
 async function appendTranscript(runDir2, sessionId, text) {
   try {
     await mkdir3(transcriptDir(runDir2), { recursive: true });
@@ -13129,6 +13207,17 @@ var Orchestrator = class {
   #log;
   #live = /* @__PURE__ */ new Map();
   #pending = /* @__PURE__ */ new Map();
+  // Stall watchdog bookkeeping. `#lastEventAt` and `#stalledSet` are kept
+  // in-memory only and rebuilt from `#live` as sessions launch and close --
+  // unlike everything reached through `#update`, they are not part of
+  // `state.json`. Writing state on every single event (some sessions emit
+  // many per second) would turn "watch for silence" into the very thing that
+  // slows a run down; only the rarer stalled/cleared transitions are
+  // persisted, by `#checkStalls` and `#onEvent` respectively.
+  #lastEventAt = /* @__PURE__ */ new Map();
+  #stalledSet = /* @__PURE__ */ new Set();
+  #stallPollMs;
+  #stallTimer;
   #switching = false;
   constructor(opts) {
     this.#config = opts.config;
@@ -13137,7 +13226,9 @@ var Orchestrator = class {
     this.#adapters = opts.adapters;
     this.#log = opts.log ?? (() => {
     });
+    this.#stallPollMs = opts.stallPollMs ?? 1e3;
     this.events.setMaxListeners(0);
+    this.#startStallWatch();
   }
   /**
    * Resolves the workspace's HEAD, records it as the run's base commit,
@@ -13256,6 +13347,7 @@ var Orchestrator = class {
             record.status = "stopped";
         }
       });
+      this.#stopStallWatch();
     } finally {
       this.#switching = false;
     }
@@ -13323,9 +13415,84 @@ var Orchestrator = class {
     };
     await writeCheckpointSet(this.#runDir, set);
     await Promise.all(entries.map(([, live]) => live.session.close()));
-    for (const [sessionId] of entries)
+    for (const [sessionId] of entries) {
       this.#live.delete(sessionId);
+      this.#lastEventAt.delete(sessionId);
+      this.#stalledSet.delete(sessionId);
+    }
     return results;
+  }
+  /**
+   * Starts the periodic scan that backs the stall watchdog. Idempotent, and
+   * safe to call before any session ever launches: an empty `#live` just
+   * means nothing to check yet. `.unref()`ed so a live orchestrator process
+   * (or a test that never calls `stop()`) is never kept alive by this timer
+   * alone.
+   */
+  #startStallWatch() {
+    if (this.#stallTimer)
+      return;
+    const timer = setInterval(() => {
+      void this.#checkStalls();
+    }, this.#stallPollMs);
+    timer.unref?.();
+    this.#stallTimer = timer;
+  }
+  #stopStallWatch() {
+    if (this.#stallTimer === void 0)
+      return;
+    clearInterval(this.#stallTimer);
+    this.#stallTimer = void 0;
+  }
+  /**
+   * The watchdog tick: any live, non-terminal session that has gone
+   * `config.stallTimeoutMs` without emitting a single event gets marked
+   * `stalled` in state, STATUS.md, `capo status`, and its own transcript.
+   *
+   * Deliberately the only thing this does. A stalled session is not touched,
+   * interrupted, or switched away from — silence is a fact for a person to
+   * act on, not a verdict CAPO reaches on its own. See `renderStallNotice`.
+   */
+  async #checkStalls() {
+    const timeout = this.#config.stallTimeoutMs;
+    const now = Date.now();
+    const state = this.#state.get();
+    const newlyStalled = [];
+    for (const sessionId of this.#live.keys()) {
+      if (this.#stalledSet.has(sessionId))
+        continue;
+      const record = state.sessions[sessionId];
+      if (!record || record.status === "stopped" || record.status === "failed")
+        continue;
+      const last = this.#lastEventAt.get(sessionId) ?? now;
+      if (now - last >= timeout)
+        newlyStalled.push(sessionId);
+    }
+    if (newlyStalled.length === 0)
+      return;
+    for (const sessionId of newlyStalled)
+      this.#stalledSet.add(sessionId);
+    const stalledAt = (/* @__PURE__ */ new Date()).toISOString();
+    try {
+      await this.#update((draft) => {
+        for (const sessionId of newlyStalled) {
+          const record = draft.sessions[sessionId];
+          if (record) {
+            record.stalled = true;
+            record.stalledSince = stalledAt;
+          }
+        }
+      });
+    } catch (err) {
+      this.#log(`stall watchdog: could not persist state: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    for (const sessionId of newlyStalled) {
+      this.#log(`[${sessionId}] stalled: no events for over ${Math.round(timeout / 1e3)}s`);
+      if (this.#config.transcripts) {
+        void appendTranscript(this.#runDir, sessionId, renderStallNotice(timeout, this.#config.autonomy));
+      }
+    }
   }
   /**
    * Replaces a checkpoint's metadata with what CAPO already knows.
@@ -13428,13 +13595,16 @@ var Orchestrator = class {
       model,
       cwd: this.#config.workspace,
       systemPrompt,
-      prompt: checkpoint ? "Resume your work from your checkpoint, above." : "Begin work toward the objective, above."
+      prompt: checkpoint ? "Resume your work from your checkpoint, above." : "Begin work toward the objective, above.",
+      autonomy: this.#config.autonomy
     };
     if (this.#config.transcripts) {
       void appendTranscript(this.#runDir, sessionId, renderSessionHeader(sessionId, platform, model, checkpoint !== void 0));
     }
     const session = await adapter.start(opts);
     this.#live.set(sessionId, { session, role, platform });
+    this.#lastEventAt.set(sessionId, Date.now());
+    this.#stalledSet.delete(sessionId);
     await this.#update((draft) => {
       draft.sessions[sessionId] = {
         id: sessionId,
@@ -13460,6 +13630,19 @@ var Orchestrator = class {
       const line = renderEvent(event);
       if (line !== void 0)
         void appendTranscript(this.#runDir, sessionId, line);
+    }
+    this.#lastEventAt.set(sessionId, Date.now());
+    if (this.#stalledSet.delete(sessionId)) {
+      await this.#update((draft) => {
+        const record = draft.sessions[sessionId];
+        if (record) {
+          record.stalled = false;
+          delete record.stalledSince;
+        }
+      });
+      if (this.#config.transcripts) {
+        void appendTranscript(this.#runDir, sessionId, renderStallClearedNotice());
+      }
     }
     switch (event.kind) {
       case "ready": {

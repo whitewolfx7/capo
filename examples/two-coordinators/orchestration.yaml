@@ -45,7 +45,22 @@ tasks:
 
 # Live per-session logs under .capo/runs/<id>/transcripts/. On by default.
 # tail -f them to watch the team work.
+# How much sessions may do on their own.
+#   autonomous (default): they act. Claude runs with acceptEdits, Codex with
+#     --approve-for-me, which keeps the workspace-write sandbox.
+#   supervised: a dry run. Sessions read and plan but do not write. Because
+#     CAPO runs headless, nobody is present to approve anything, so a
+#     supervised run will stop rather than make changes.
+autonomy: autonomous
+
 transcripts: true
+
+# How long a live session can emit zero events before CAPO marks it
+# "stalled" in `capo status`, STATUS.md, and its own transcript. Purely
+# informational: a stall never pauses, kills, or switches anything by
+# itself -- it just makes silence visible so a person can look. Default
+# shown; 5 minutes.
+stall_timeout_ms: 300000
 
 limits:
   max_workers_per_coordinator: 2

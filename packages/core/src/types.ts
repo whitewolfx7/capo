@@ -49,7 +49,27 @@ export interface CapoConfig {
    * Set `transcripts: false` to turn it off.
    */
   transcripts: boolean;
+  /**
+   * How long a live session may emit no events at all before the orchestrator
+   * marks it "stalled" (see `SessionRecord.stalled`). A session that finished
+   * its work and a session stuck waiting forever for a permission answer that
+   * will never come look identical from the outside: both go quiet. This is
+   * the threshold that turns that silence into something visible. Purely
+   * informational — crossing it never kills or switches anything.
+   */
+  stallTimeoutMs: number;
+  /**
+   * How much autonomy a session gets to act without stopping to ask a human,
+   * applied per platform adapter (an adapter that has no use for the
+   * distinction may ignore it). "supervised" is the default and changes
+   * nothing about a platform's own out-of-the-box behavior. "autonomous"
+   * currently only affects the Codex adapter: see its `autonomyFlags` for why
+   * granting it is defensible here.
+   */
+  autonomy: AutonomyLevel;
 }
+
+export type AutonomyLevel = 'supervised' | 'autonomous';
 
 /* ---------- run state ---------- */
 
@@ -90,6 +110,16 @@ export interface SessionRecord {
   /** Opaque to CAPO. Whatever the platform calls its own session. */
   platformSessionId?: string;
   status: SessionStatus;
+  /**
+   * Set once the session has gone `stallTimeoutMs` with no events at all.
+   * Optional (rather than defaulted `false`) so older `state.json` files, and
+   * anything that builds a `SessionRecord` by hand, stay valid without it.
+   * Never implies failure: a session can be working hard and silent, e.g.
+   * mid a long tool call.
+   */
+  stalled?: boolean;
+  /** ISO timestamp of when `stalled` most recently became true. */
+  stalledSince?: string;
 }
 
 export type RunStatus = 'running' | 'switching' | 'waiting' | 'done' | 'failed';
@@ -160,6 +190,12 @@ export interface StartSessionOptions {
   cwd: string;
   systemPrompt: string;
   prompt: string;
+  /**
+   * Optional so adapters (and every existing call site, real or in tests)
+   * that predate this field keep compiling and default to the conservative
+   * "supervised" behavior. Only the Codex adapter currently reads it.
+   */
+  autonomy?: AutonomyLevel;
 }
 
 export type AdapterEvent =

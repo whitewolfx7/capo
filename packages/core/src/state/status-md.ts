@@ -29,11 +29,12 @@ export function renderStatusMarkdown(state: RunState): string {
   if (sessions.length === 0) {
     lines.push('_none running_');
   } else {
-    lines.push('| session | role | platform | status | platform session id |');
-    lines.push('| --- | --- | --- | --- | --- |');
+    lines.push('| session | role | platform | status | stalled | platform session id |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
     for (const s of sessions) {
+      const stalled = s.stalled ? `yes, since ${s.stalledSince ?? 'unknown'}` : 'no';
       lines.push(
-        `| ${s.id} | ${s.role} | ${s.platform} | ${s.status} | ${s.platformSessionId ?? '-'} |`,
+        `| ${s.id} | ${s.role} | ${s.platform} | ${s.status} | ${stalled} | ${s.platformSessionId ?? '-'} |`,
       );
     }
     lines.push('');

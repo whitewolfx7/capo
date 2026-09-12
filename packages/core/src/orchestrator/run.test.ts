@@ -95,7 +95,12 @@ function withDeadline<T>(promise: Promise<T>, label: string, ms = 5000): Promise
   ]);
 }
 
-async function harness(makeAdapter: (id: string) => FakeAdapter = (id) => new ArmedFakeAdapter(id)): Promise<{
+async function harness(
+  makeAdapter: (id: string) => FakeAdapter = (id) => new ArmedFakeAdapter(id),
+  /** Test-only seams for the stall watchdog: real milliseconds, not part of
+   * CONFIG_YAML, so most tests never have to think about it. */
+  watchdog: { stallTimeoutMs?: number; stallPollMs?: number } = {},
+): Promise<{
   orch: Orchestrator;
   claude: FakeAdapter;
   codex: FakeAdapter;
@@ -129,7 +134,11 @@ async function harness(makeAdapter: (id: string) => FakeAdapter = (id) => new Ar
   }
 
   const configPath = join(workspace, 'orchestration.yaml');
-  await writeFile(configPath, CONFIG_YAML);
+  const yaml =
+    watchdog.stallTimeoutMs === undefined
+      ? CONFIG_YAML
+      : `${CONFIG_YAML}\nstall_timeout_ms: ${watchdog.stallTimeoutMs}\n`;
+  await writeFile(configPath, yaml);
   const config = await loadConfig(configPath);
 
   const claude = makeAdapter('claude');
@@ -155,7 +164,14 @@ async function harness(makeAdapter: (id: string) => FakeAdapter = (id) => new Ar
     ['codex', codex],
   ]);
 
-  const orch = new Orchestrator({ config, runDir: runDirPath, state, adapters, log: () => {} });
+  const orch = new Orchestrator({
+    config,
+    runDir: runDirPath,
+    state,
+    adapters,
+    log: () => {},
+    stallPollMs: watchdog.stallPollMs,
+  });
 
   return { orch, claude, codex, state, dir: runDirPath, config, adapters };
 }
@@ -464,5 +480,60 @@ describe('checkpoint metadata is CAPO\'s, not the session\'s', () => {
     const root = set.checkpoints.find((c) => c.sessionId === 'root');
     expect(root?.role, 'role comes from CAPO, not the session').toBe('root');
     expect(config).toBeDefined();
+  });
+});
+
+describe('stall watchdog', () => {
+  /**
+   * A real Codex coordinator once ended its turn asking a human to approve a
+   * fix, then sat there forever: nothing else ever arrived on its stream, and
+   * nothing in CAPO noticed. These tests stand in for that: a session that
+   * goes quiet — for any reason — should become visible without CAPO taking
+   * any action on its own.
+   */
+  async function waitFor(check: () => boolean, ms = 2000): Promise<void> {
+    const start = Date.now();
+    while (!check()) {
+      if (Date.now() - start > ms) throw new Error('timed out waiting for condition');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
+
+  it('marks a live, silent session stalled after stallTimeoutMs, and touches nothing else', async () => {
+    const { orch, claude, state } = await harness(undefined, { stallTimeoutMs: 30, stallPollMs: 5 });
+    await orch.start();
+
+    await waitFor(() => state.get().sessions['root']?.stalled === true);
+
+    const record = state.get().sessions['root']!;
+    expect(record.stalledSince).toBeTruthy();
+    // Silence is information, not a verdict: everything else is unchanged.
+    expect(record.status).toBe('running');
+    expect(state.get().status).toBe('running');
+    expect(claude.started).toHaveLength(3);
+  });
+
+  it('clears once the stalled session emits another event', async () => {
+    const { orch, claude, state } = await harness(undefined, { stallTimeoutMs: 30, stallPollMs: 5 });
+    await orch.start();
+    await waitFor(() => state.get().sessions['root']?.stalled === true);
+
+    claude.emit('root', { kind: 'tool', name: 'still-working' });
+    await waitFor(() => state.get().sessions['root']?.stalled === false);
+
+    expect(state.get().sessions['root']!.stalledSince).toBeUndefined();
+  });
+
+  it('never flags a session that keeps emitting events', async () => {
+    const { orch, claude, state } = await harness(undefined, { stallTimeoutMs: 40, stallPollMs: 5 });
+    await orch.start();
+
+    const until = Date.now() + 150;
+    while (Date.now() < until) {
+      claude.emit('root', { kind: 'tool', name: 'poke' });
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    expect(state.get().sessions['root']?.stalled).not.toBe(true);
   });
 });

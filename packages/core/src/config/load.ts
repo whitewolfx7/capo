@@ -67,6 +67,8 @@ export async function loadConfig(configPath: string): Promise<CapoConfig> {
     coordinators: file.coordinators.map((c) => ({ id: c.id })),
     tasks,
     transcripts: file.transcripts,
+    stallTimeoutMs: file.stall_timeout_ms,
+    autonomy: file.autonomy,
     limits: { maxWorkersPerCoordinator: file.limits.max_workers_per_coordinator },
   };
 

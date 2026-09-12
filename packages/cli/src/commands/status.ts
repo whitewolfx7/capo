@@ -86,7 +86,8 @@ function renderHuman(state: RunState, live: boolean, runId: string): string {
   } else {
     for (const s of sessions) {
       const sid = s.platformSessionId !== undefined ? `  session-id=${s.platformSessionId}` : '';
-      lines.push(`  ${s.id}  role=${s.role}  platform=${s.platform}  status=${s.status}${sid}`);
+      const stall = s.stalled ? `  STALLED since ${s.stalledSince ?? 'unknown'}` : '';
+      lines.push(`  ${s.id}  role=${s.role}  platform=${s.platform}  status=${s.status}${stall}${sid}`);
     }
   }
   lines.push('');

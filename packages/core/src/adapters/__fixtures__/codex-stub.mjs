@@ -38,8 +38,12 @@ if (argv.includes('--version')) {
   process.exit(0);
 }
 
-const isResume = argv[0] === 'exec' && argv[1] === 'resume';
-const sessionId = isResume ? argv[2] : `stub-session-${randomUUID()}`;
+// `resume` may not be argv[1]: autonomy flags (e.g. --approve-for-me) are
+// parsed by `exec` itself and land between it and a `resume` subcommand, so
+// resume is detected by presence rather than fixed position.
+const resumeAt = argv.indexOf('resume');
+const isResume = argv[0] === 'exec' && resumeAt !== -1;
+const sessionId = isResume ? argv[resumeAt + 1] : `stub-session-${randomUUID()}`;
 
 // In both invocation shapes CodexAdapter uses, the prompt is the last
 // positional argument.

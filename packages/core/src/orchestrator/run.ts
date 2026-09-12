@@ -25,7 +25,13 @@ import type {
 import type { StateStore } from '../state/store.js';
 import { latestCheckpointSet, writeCheckpointSet } from '../checkpoint/store.js';
 import { renderStatusMarkdown } from '../state/status-md.js';
-import { appendTranscript, renderEvent, renderSessionHeader } from './transcript.js';
+import {
+  appendTranscript,
+  renderEvent,
+  renderSessionHeader,
+  renderStallClearedNotice,
+  renderStallNotice,
+} from './transcript.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
 import { headCommit, addWorktree } from '../git/repo.js';
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
@@ -38,6 +44,14 @@ export interface OrchestratorOptions {
   state: StateStore;
   adapters: Map<PlatformId, PlatformAdapter>;
   log?: (line: string) => void;
+  /**
+   * How often the stall watchdog polls (see `#checkStalls`). Not a config
+   * file setting — `config.stallTimeoutMs` is the threshold a person cares
+   * about; this is purely how finely the orchestrator samples for it.
+   * Defaults to 1s, which is fine against a real `stallTimeoutMs` measured in
+   * minutes. Tests pass a smaller value so they don't have to wait minutes.
+   */
+  stallPollMs?: number;
 }
 
 interface LiveSession {
@@ -58,6 +72,18 @@ export class Orchestrator {
   readonly #live = new Map<SessionId, LiveSession>();
   readonly #pending = new Map<SessionId, (cp: Checkpoint) => void>();
 
+  // Stall watchdog bookkeeping. `#lastEventAt` and `#stalledSet` are kept
+  // in-memory only and rebuilt from `#live` as sessions launch and close --
+  // unlike everything reached through `#update`, they are not part of
+  // `state.json`. Writing state on every single event (some sessions emit
+  // many per second) would turn "watch for silence" into the very thing that
+  // slows a run down; only the rarer stalled/cleared transitions are
+  // persisted, by `#checkStalls` and `#onEvent` respectively.
+  readonly #lastEventAt = new Map<SessionId, number>();
+  readonly #stalledSet = new Set<SessionId>();
+  readonly #stallPollMs: number;
+  #stallTimer: NodeJS.Timeout | undefined;
+
   #switching = false;
 
   constructor(opts: OrchestratorOptions) {
@@ -66,7 +92,9 @@ export class Orchestrator {
     this.#state = opts.state;
     this.#adapters = opts.adapters;
     this.#log = opts.log ?? (() => {});
+    this.#stallPollMs = opts.stallPollMs ?? 1000;
     this.events.setMaxListeners(0);
+    this.#startStallWatch();
   }
 
   /**
@@ -204,6 +232,7 @@ export class Orchestrator {
           if (record) record.status = 'stopped';
         }
       });
+      this.#stopStallWatch();
     } finally {
       this.#switching = false;
     }
@@ -282,9 +311,88 @@ export class Orchestrator {
     await writeCheckpointSet(this.#runDir, set);
 
     await Promise.all(entries.map(([, live]) => live.session.close()));
-    for (const [sessionId] of entries) this.#live.delete(sessionId);
+    for (const [sessionId] of entries) {
+      this.#live.delete(sessionId);
+      this.#lastEventAt.delete(sessionId);
+      this.#stalledSet.delete(sessionId);
+    }
 
     return results;
+  }
+
+  /**
+   * Starts the periodic scan that backs the stall watchdog. Idempotent, and
+   * safe to call before any session ever launches: an empty `#live` just
+   * means nothing to check yet. `.unref()`ed so a live orchestrator process
+   * (or a test that never calls `stop()`) is never kept alive by this timer
+   * alone.
+   */
+  #startStallWatch(): void {
+    if (this.#stallTimer) return;
+    const timer = setInterval(() => {
+      void this.#checkStalls();
+    }, this.#stallPollMs);
+    timer.unref?.();
+    this.#stallTimer = timer;
+  }
+
+  #stopStallWatch(): void {
+    if (this.#stallTimer === undefined) return;
+    clearInterval(this.#stallTimer);
+    this.#stallTimer = undefined;
+  }
+
+  /**
+   * The watchdog tick: any live, non-terminal session that has gone
+   * `config.stallTimeoutMs` without emitting a single event gets marked
+   * `stalled` in state, STATUS.md, `capo status`, and its own transcript.
+   *
+   * Deliberately the only thing this does. A stalled session is not touched,
+   * interrupted, or switched away from — silence is a fact for a person to
+   * act on, not a verdict CAPO reaches on its own. See `renderStallNotice`.
+   */
+  async #checkStalls(): Promise<void> {
+    const timeout = this.#config.stallTimeoutMs;
+    const now = Date.now();
+    const state = this.#state.get();
+
+    const newlyStalled: SessionId[] = [];
+    for (const sessionId of this.#live.keys()) {
+      if (this.#stalledSet.has(sessionId)) continue;
+      const record = state.sessions[sessionId];
+      if (!record || record.status === 'stopped' || record.status === 'failed') continue;
+      const last = this.#lastEventAt.get(sessionId) ?? now;
+      if (now - last >= timeout) newlyStalled.push(sessionId);
+    }
+    if (newlyStalled.length === 0) return;
+
+    for (const sessionId of newlyStalled) this.#stalledSet.add(sessionId);
+    const stalledAt = new Date().toISOString();
+    try {
+      // Runs off a timer, not off #pump()'s try/catch, so a failure here
+      // (e.g. the run directory disappearing as the process winds down) must
+      // be swallowed right here or it becomes an unhandled rejection instead
+      // of the harmless miss a view being briefly stale would be.
+      await this.#update((draft) => {
+        for (const sessionId of newlyStalled) {
+          const record = draft.sessions[sessionId];
+          if (record) {
+            record.stalled = true;
+            record.stalledSince = stalledAt;
+          }
+        }
+      });
+    } catch (err) {
+      this.#log(`stall watchdog: could not persist state: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    for (const sessionId of newlyStalled) {
+      this.#log(`[${sessionId}] stalled: no events for over ${Math.round(timeout / 1000)}s`);
+      if (this.#config.transcripts) {
+        void appendTranscript(this.#runDir, sessionId, renderStallNotice(timeout, this.#config.autonomy));
+      }
+    }
   }
 
   /**
@@ -418,6 +526,7 @@ export class Orchestrator {
       cwd: this.#config.workspace,
       systemPrompt,
       prompt: checkpoint ? 'Resume your work from your checkpoint, above.' : 'Begin work toward the objective, above.',
+      autonomy: this.#config.autonomy,
     };
 
     if (this.#config.transcripts) {
@@ -432,6 +541,11 @@ export class Orchestrator {
 
     const session = await adapter.start(opts);
     this.#live.set(sessionId, { session, role, platform });
+    // A fresh clock for the stall watchdog: a relaunch on the other platform
+    // after a switch reuses the same session id, and must not inherit a
+    // "stalled" mark (or its last-event time) from the platform it just left.
+    this.#lastEventAt.set(sessionId, Date.now());
+    this.#stalledSet.delete(sessionId);
 
     await this.#update((draft) => {
       draft.sessions[sessionId] = {
@@ -463,6 +577,24 @@ export class Orchestrator {
     if (this.#config.transcripts) {
       const line = renderEvent(event);
       if (line !== undefined) void appendTranscript(this.#runDir, sessionId, line);
+    }
+
+    // Any event at all is proof of life, so it resets the stall clock
+    // regardless of what kind it is. Only the (rare) transition out of
+    // "stalled" is written to state and the transcript — see `#checkStalls`
+    // for why every event isn't.
+    this.#lastEventAt.set(sessionId, Date.now());
+    if (this.#stalledSet.delete(sessionId)) {
+      await this.#update((draft) => {
+        const record = draft.sessions[sessionId];
+        if (record) {
+          record.stalled = false;
+          delete record.stalledSince;
+        }
+      });
+      if (this.#config.transcripts) {
+        void appendTranscript(this.#runDir, sessionId, renderStallClearedNotice());
+      }
     }
 
     switch (event.kind) {

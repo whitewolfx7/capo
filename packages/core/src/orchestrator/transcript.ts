@@ -13,7 +13,7 @@
  */
 import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { AdapterEvent, PlatformId, SessionId } from '../types.js';
+import type { AdapterEvent, AutonomyLevel, PlatformId, SessionId } from '../types.js';
 
 export function transcriptDir(runDir: string): string {
   return join(runDir, 'transcripts');
@@ -72,6 +72,44 @@ export function renderEvent(event: AdapterEvent): string | undefined {
       // The header already says the session started.
       return undefined;
   }
+}
+
+/**
+ * The notice appended when the stall watchdog marks a session silent (see
+ * `Orchestrator`'s `#checkStalls`). Not an `AdapterEvent` — CAPO generates
+ * this about a session, not from one — so it doesn't go through
+ * `renderEvent()`.
+ */
+export function renderStallNotice(timeoutMs: number, autonomy?: AutonomyLevel): string {
+  const seconds = Math.round(timeoutMs / 1000);
+  const lines = [
+    '',
+    `> **STALLED** at ${new Date().toISOString()}: no events for over ${seconds}s.`,
+    '> Not necessarily a problem: this session may be deep in a slow tool call,',
+    '> or waiting on an answer from a human that never arrives. CAPO will not',
+    '> act on this by itself — it is only visible here, in `capo status`, and',
+    '> in STATUS.md so a person can decide.',
+  ];
+  if (autonomy === 'supervised') {
+    // The observed cause of the original stall: an agent asked "approve?" and
+    // waited forever, because a headless session has nobody to answer it.
+    lines.push(
+      '>',
+      '> This run is `autonomy: supervised`, so sessions may act only in a',
+      '> read-and-plan capacity and will stop to ask before writing anything.',
+      '> Nobody is present to answer. If you meant this run to do work, set',
+      '> `autonomy: autonomous` in the config and resume.',
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+/** Appended once a previously stalled session starts emitting events again. */
+export function renderStallClearedNotice(): string {
+  return ['', `> _stall cleared at ${new Date().toISOString()}: events are flowing again._`, ''].join(
+    '\n',
+  );
 }
 
 /**

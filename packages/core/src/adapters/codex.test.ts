@@ -31,6 +31,53 @@ describe('CodexAdapter argv', () => {
     await session.close();
   });
 
+  it('adds no autonomy flag when autonomy is left unset (the "supervised" default)', async () => {
+    const adapter = new CodexAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const session = (await adapter.start(opts0())) as DebugSession;
+    expect(session.debugArgv[0]).not.toContain('--approve-for-me');
+    await session.close();
+  });
+
+  it('passes --approve-for-me on every turn, first and resumed, when autonomy is "autonomous"', async () => {
+    const adapter = new CodexAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const session = (await adapter.start({ ...opts0(), autonomy: 'autonomous' })) as DebugSession;
+
+    // Placed right after `exec`, ahead of --json/-m: verified against a real
+    // `codex exec --approve-for-me resume --help` that this parses correctly
+    // whether or not a `resume` subcommand follows (see codex.ts).
+    expect(session.debugArgv[0]).toEqual([
+      'exec',
+      '--approve-for-me',
+      '--json',
+      '-m',
+      'test-model',
+      expect.any(String),
+    ]);
+
+    // Drain through the first turn's turn-end before sending a second turn,
+    // then through the second turn's, so the resumed child's argv-echo line
+    // (read off its stdout, same as the first child's) is guaranteed to have
+    // landed in debugArgv before it's asserted on below.
+    const iterator = session.events()[Symbol.asyncIterator]();
+    async function nextOfKind(kind: AdapterEvent['kind']): Promise<void> {
+      for (;;) {
+        const result = await iterator.next();
+        if (result.done) throw new Error(`stream ended before a "${kind}" event`);
+        if (result.value?.kind === kind) return;
+      }
+    }
+    await nextOfKind('turn-end');
+    await session.send('second turn');
+    await nextOfKind('turn-end');
+
+    const resumeArgv = session.debugArgv[1]!;
+    expect(resumeArgv[0]).toBe('exec');
+    expect(resumeArgv[1]).toBe('--approve-for-me');
+    expect(resumeArgv).toContain('resume');
+
+    await session.close();
+  });
+
   it('captures the platform session id from the session-configured event before start() returns', async () => {
     const adapter = new CodexAdapter({ executable: process.execPath, extraArgs: [stub] });
     const session = await adapter.start(opts0());

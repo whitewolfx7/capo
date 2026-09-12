@@ -68,6 +68,7 @@ import { parseResetAt } from './reset-time.js';
 import type {
   AdapterEvent,
   AdapterSession,
+  AutonomyLevel,
   DoctorResult,
   PlatformAdapter,
   PlatformId,
@@ -324,7 +325,7 @@ export class ClaudeAdapter implements PlatformAdapter {
       '--append-system-prompt',
       opts.systemPrompt,
       '--permission-mode',
-      'acceptEdits',
+      permissionMode(opts.autonomy),
     ];
 
     const child: ChildProcessWithoutNullStreams = spawn(this.executable, args, {
@@ -470,4 +471,20 @@ export class ClaudeAdapter implements PlatformAdapter {
 
     return session;
   }
+}
+
+/**
+ * Maps CAPO's autonomy level onto a Claude Code permission mode.
+ *
+ * A headless session has nobody to ask, so the choice is really between
+ * "allowed to act" and "dry run". `acceptEdits` is what CAPO has always used
+ * and what a real run needs; a live run confirmed it auto-approves Write and
+ * Bash calls with no hang. `plan` lets a supervised run read and reason
+ * without writing anything.
+ *
+ * Defaults to autonomous when unset so an adapter constructed without the
+ * field behaves exactly as CAPO always has.
+ */
+function permissionMode(level: AutonomyLevel | undefined): string {
+  return (level ?? 'autonomous') === 'supervised' ? 'plan' : 'acceptEdits';
 }

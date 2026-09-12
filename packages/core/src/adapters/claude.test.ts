@@ -199,3 +199,37 @@ describe('ClaudeAdapter.doctor', () => {
     await expect(a.doctor()).resolves.toMatchObject({ ok: false });
   });
 });
+
+describe('ClaudeAdapter autonomy', () => {
+  /**
+   * A headless session has nobody to answer an approval request, so the
+   * autonomy level really chooses between "allowed to act" and "dry run".
+   * Claude used to hardcode acceptEdits regardless, which made `supervised`
+   * a lie: the config said one thing and the session did another.
+   */
+  async function permissionModeFor(autonomy?: 'supervised' | 'autonomous'): Promise<string> {
+    const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const s = await a.start({
+      sessionId: 'root', role: 'root', model: 'haiku', cwd: process.cwd(),
+      systemPrompt: 'be root', prompt: 'go',
+      ...(autonomy ? { autonomy } : {}),
+    });
+    const argv = a.lastArgv ?? [];
+    await s.close();
+    const i = argv.indexOf('--permission-mode');
+    expect(i, 'the flag is present').toBeGreaterThan(-1);
+    return argv[i + 1]!;
+  }
+
+  it('acts when autonomous', async () => {
+    expect(await permissionModeFor('autonomous')).toBe('acceptEdits');
+  });
+
+  it('only reads and plans when supervised', async () => {
+    expect(await permissionModeFor('supervised')).toBe('plan');
+  });
+
+  it('defaults to acting, which is what CAPO has always done', async () => {
+    expect(await permissionModeFor()).toBe('acceptEdits');
+  });
+});

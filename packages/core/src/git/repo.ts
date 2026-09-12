@@ -91,6 +91,31 @@ export function identityArgs(identity?: GitIdentity): string[] {
 const NO_IDENTITY = /Please tell me who you are|unable to auto-detect email address|empty ident name/i;
 
 /**
+ * Throws unless git can name a committer in `repo`.
+ *
+ * Called before a run starts, because every way CAPO has of failing this
+ * check later is expensive: the identity is not needed until integration,
+ * which is after every coordinator has finished its work. A CI machine with
+ * no configured identity reached exactly that point -- all the model work
+ * done, nothing integrated -- and the only visible symptom was tasks stuck
+ * in `review`.
+ */
+export async function assertAuthorIdentity(repo: string): Promise<void> {
+  try {
+    await git(repo, ['var', 'GIT_COMMITTER_IDENT']);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (NO_IDENTITY.test(detail)) {
+      throw new CapoError(
+        `git has no author identity configured in ${repo}`,
+        'set one with: git config --global user.email "you@example.com" && git config --global user.name "Your Name"',
+      );
+    }
+    throw err;
+  }
+}
+
+/**
  * Stages everything and commits. Returns the new sha, or undefined when there
  * was nothing to commit.
  *

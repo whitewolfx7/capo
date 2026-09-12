@@ -125,6 +125,28 @@ describe('integrate', () => {
     expect(rep.checksPassed).toBe(true);
   });
 
+  // A merge can fail for reasons that have nothing to do with the diffs. When
+  // it does, git leaves no MERGE_HEAD, so the unconditional `merge --abort`
+  // that used to follow threw a second error out of integrate() -- and the
+  // caller, seeing only that, had no task outcomes at all. A non-conflict
+  // failure must surface as itself, not as a conflict with no files.
+  it('surfaces a merge that failed for a non-conflict reason instead of calling it a conflict', async () => {
+    const base = await seed();
+    const a = await work('a', base, { 'src/a/new.ts': 'export const n = 1;\n' });
+    // No identity passed and none configurable: the merge commit cannot be
+    // written, which is exactly what a machine with no git identity hits.
+    await git(repo, ['config', 'user.email', '']);
+    await git(repo, ['config', 'user.name', '']);
+
+    await expect(
+      integrate({
+        repo, runDir: join(repo, '.capo/runs/r-noident'), baseCommit: base,
+        tasks: [{ ...task('a', ['src/a/']), baseCommit: base }],
+        submissions: new Map([['a', { taskId: 'a', baseCommit: base, resultCommit: a, evidence: 'ok' }]]),
+      }),
+    ).rejects.toThrow(/identity|ident/i);
+  });
+
   it('reports a conflict on the second task without losing the first', async () => {
     const base = await seed();
     const a = await work('a', base, { 'src/a/keep.ts': 'export const a = 2;\n' });

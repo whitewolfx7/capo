@@ -76,9 +76,28 @@ async function checkGit(): Promise<DoctorResult> {
   try {
     const { stdout } = await execFile('git', ['--version'], { timeout: 10_000 });
     const version = stdout.trim();
-    return version.length > 0
-      ? { ok: true, version, problems: [] }
-      : { ok: false, problems: ['`git --version` printed nothing'] };
+    if (version.length === 0) {
+      return { ok: false, problems: ['`git --version` printed nothing'] };
+    }
+
+    // An identity is not needed until a run integrates, which is after every
+    // session has finished its work. Checking it here means a machine without
+    // one finds out before it spends anything, not after.
+    try {
+      await execFile('git', ['var', 'GIT_COMMITTER_IDENT'], { timeout: 10_000 });
+    } catch {
+      return {
+        ok: false,
+        version,
+        problems: [
+          'git has no author identity configured, so CAPO could not commit or integrate. ' +
+            'Set one with: git config --global user.email "you@example.com" && ' +
+            'git config --global user.name "Your Name"',
+        ],
+      };
+    }
+
+    return { ok: true, version, problems: [] };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return { ok: false, problems: [`could not run \`git --version\`: ${detail}`] };

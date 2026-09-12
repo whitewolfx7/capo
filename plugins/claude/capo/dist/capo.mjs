@@ -12126,6 +12126,18 @@ function identityArgs(identity) {
     "commit.gpgsign=false"
   ];
 }
+var NO_IDENTITY = /Please tell me who you are|unable to auto-detect email address|empty ident name/i;
+async function assertAuthorIdentity(repo) {
+  try {
+    await git(repo, ["var", "GIT_COMMITTER_IDENT"]);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (NO_IDENTITY.test(detail)) {
+      throw new CapoError(`git has no author identity configured in ${repo}`, 'set one with: git config --global user.email "you@example.com" && git config --global user.name "Your Name"');
+    }
+    throw err;
+  }
+}
 async function changedPaths(repo, base, head) {
   const out = await git(repo, ["diff", "--name-only", "--find-renames", base, head]);
   if (out.length === 0)
@@ -12336,6 +12348,20 @@ var FakeAdapter = class {
       throw new Error(`fake adapter: cannot emit to session "${sessionId}": not started or already closed`);
     }
     state.queue.push(event);
+  }
+  /**
+   * End a live session's event stream without the orchestrator having asked,
+   * the way a real session ends when its CLI process dies on its own. Unlike
+   * `close()`, this is not recorded in `closed`: nothing closed it, it just
+   * stopped.
+   */
+  endStream(sessionId) {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.closed) {
+      throw new Error(`fake adapter: cannot end session "${sessionId}": not started or already closed`);
+    }
+    state.closed = true;
+    state.queue.end();
   }
   /** Make exactly the next start() call reject with `message`, and only the next one. */
   failNextStart(message) {
@@ -13386,6 +13412,14 @@ async function acceptResult(repo, task, sub) {
   }
   return { accepted: true, violations: [] };
 }
+async function inMerge(worktree) {
+  try {
+    await git(worktree, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function integrate(opts) {
   const { repo, runDir: runDir2, baseCommit, tasks, submissions, checkCommand, identity } = opts;
   const worktree = join5(runDir2, "integration");
@@ -13407,10 +13441,14 @@ async function integrate(opts) {
         sub.resultCommit
       ]);
       merged.push(task.id);
-    } catch {
+    } catch (err) {
       const filesOut = await git(worktree, ["diff", "--name-only", "--diff-filter=U"]);
       const files = filesOut.length === 0 ? [] : filesOut.split("\n");
-      await git(worktree, ["merge", "--abort"]);
+      const mid = await inMerge(worktree);
+      if (mid)
+        await git(worktree, ["merge", "--abort"]);
+      if (!mid && files.length === 0)
+        throw err;
       conflicted.push({ taskId: task.id, files });
     }
   }
@@ -13513,6 +13551,7 @@ var Orchestrator = class {
     return next;
   }
   async start() {
+    await assertAuthorIdentity(this.#config.workspace);
     const base = await headCommit(this.#config.workspace);
     const taskRecords = [];
     for (const task of this.#config.tasks) {
@@ -13931,12 +13970,16 @@ var Orchestrator = class {
     this.#live.delete(sessionId);
     this.#lastEventAt.delete(sessionId);
     this.#stalledSet.delete(sessionId);
-    await this.#update((draft) => {
-      const record = draft.sessions[sessionId];
-      if (record && record.status !== "failed")
-        record.status = "stopped";
-    });
-    await this.#maybeAbandon();
+    try {
+      await this.#update((draft) => {
+        const record = draft.sessions[sessionId];
+        if (record && record.status !== "failed")
+          record.status = "stopped";
+      });
+      await this.#maybeAbandon();
+    } catch (err) {
+      this.#log(`[${sessionId}] could not record session end: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   /**
    * Ends a run that has nothing left alive to finish it. A session dying is
@@ -14167,9 +14210,14 @@ var Orchestrator = class {
         checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : void 0
       });
     } catch (err) {
-      this.#log(`integration failed to run: ${err instanceof Error ? err.message : String(err)}`);
+      const reason = err instanceof Error ? err.message : String(err);
+      this.#log(`integration failed to run: ${reason}`);
       await this.#update((draft) => {
         draft.status = "failed";
+        for (const task of Object.values(draft.tasks)) {
+          if (task.state === "review")
+            task.note = `integration could not run: ${reason}`;
+        }
       });
       this.events.emit("integration-finished", {
         status: "failed",
@@ -14728,7 +14776,21 @@ async function checkGit() {
   try {
     const { stdout } = await execFile4("git", ["--version"], { timeout: 1e4 });
     const version = stdout.trim();
-    return version.length > 0 ? { ok: true, version, problems: [] } : { ok: false, problems: ["`git --version` printed nothing"] };
+    if (version.length === 0) {
+      return { ok: false, problems: ["`git --version` printed nothing"] };
+    }
+    try {
+      await execFile4("git", ["var", "GIT_COMMITTER_IDENT"], { timeout: 1e4 });
+    } catch {
+      return {
+        ok: false,
+        version,
+        problems: [
+          'git has no author identity configured, so CAPO could not commit or integrate. Set one with: git config --global user.email "you@example.com" && git config --global user.name "Your Name"'
+        ]
+      };
+    }
+    return { ok: true, version, problems: [] };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     return { ok: false, problems: [`could not run \`git --version\`: ${detail}`] };

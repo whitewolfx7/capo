@@ -138,8 +138,13 @@ async function harness(
   dirs.push(workspace);
 
   await git(workspace, ['init', '-b', 'main']);
+  // A repo-local identity, so the suite does not depend on the developer's
+  // global git config -- and so it exercises the same path a real user is on,
+  // where integration's merge commits use the repository's own identity. CI
+  // has none configured, which is how the missing preflight was found.
+  await git(workspace, ['config', 'user.email', 'capo-tests@example.com']);
+  await git(workspace, ['config', 'user.name', 'CAPO tests']);
   await writeFile(join(workspace, 'README.md'), '# demo\n');
-  // Identity passed explicitly so the suite passes on a clean machine and CI.
   await commitAll(workspace, 'initial commit', { name: 't', email: 't@t' });
 
   await mkdir(join(workspace, 'context'), { recursive: true });
@@ -815,5 +820,43 @@ describe('integration', () => {
 
     expect(state.get().sessions['team-b']!.status).toBe('stopped');
     expect(state.get().status).toBe('running');
+  });
+  // CI had no git identity and reached integration with every coordinator's
+  // work already done, then lost all of it: the merge failed for a reason
+  // that was not a conflict, `merge --abort` threw on top of it, and every
+  // task stayed at `review` with a failed run above it and no stated reason.
+  it('refuses to start when git has no author identity, before spending a single model call', async () => {
+    const { orch, config, claude } = await harness();
+    // Empty rather than unset: a repo-local empty identity overrides whatever
+    // the developer has configured globally, so this behaves the same on a
+    // laptop with a git identity and on CI without one.
+    await git(config.workspace, ['config', 'user.email', '']);
+    await git(config.workspace, ['config', 'user.name', '']);
+
+    await expect(orch.start()).rejects.toThrow(/identity/i);
+    expect(claude.started).toEqual([]);
+  });
+
+  it('explains itself in the task table when integration cannot run at all', async () => {
+    const { orch, claude, state, config } = await harness();
+    await orch.start();
+    const tasks = Object.values(state.get().tasks);
+
+    // Identity emptied after launch: every session has already done its work,
+    // and the merge integration is about to attempt cannot be committed.
+    await git(config.workspace, ['config', 'user.email', '']);
+    await git(config.workspace, ['config', 'user.name', '']);
+
+    const finished = withDeadline(once(orch.events, 'integration-finished'), 'integration-finished');
+    for (const task of tasks) {
+      const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+      claude.emit(task.coordinator, { kind: 'text', text: resultBlock(task.id, sha) });
+    }
+    await finished;
+
+    expect(state.get().status).toBe('failed');
+    for (const task of tasks) {
+      expect(state.get().tasks[task.id]!.note).toMatch(/integration could not run/i);
+    }
   });
 });

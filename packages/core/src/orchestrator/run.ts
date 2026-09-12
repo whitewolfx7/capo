@@ -34,7 +34,7 @@ import {
   renderStallNotice,
 } from './transcript.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
-import { headCommit, addWorktree } from '../git/repo.js';
+import { headCommit, addWorktree, assertAuthorIdentity } from '../git/repo.js';
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
 import { extractResult, parseResult } from './result.js';
 import { acceptResult, integrate, type IntegrationReport, type ResultSubmission } from '../integrate/merge.js';
@@ -143,6 +143,11 @@ export class Orchestrator {
   }
 
   async start(): Promise<void> {
+    // Before any model call. The identity is not needed until integration,
+    // which is after every session has done its work -- so without this
+    // check, the cheapest possible failure is discovered at the most
+    // expensive possible moment.
+    await assertAuthorIdentity(this.#config.workspace);
     const base = await headCommit(this.#config.workspace);
 
     const taskRecords: TaskRecord[] = [];
@@ -938,9 +943,17 @@ export class Orchestrator {
         checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : undefined,
       });
     } catch (err) {
-      this.#log(`integration failed to run: ${err instanceof Error ? err.message : String(err)}`);
+      // Integration never got far enough to judge any individual task, so
+      // none of them can be called done or failed on their own merits. Say
+      // that in the task table rather than leaving every task sitting at
+      // `review` with a failed run above it and no stated reason.
+      const reason = err instanceof Error ? err.message : String(err);
+      this.#log(`integration failed to run: ${reason}`);
       await this.#update((draft) => {
         draft.status = 'failed';
+        for (const task of Object.values(draft.tasks)) {
+          if (task.state === 'review') task.note = `integration could not run: ${reason}`;
+        }
       });
       this.events.emit('integration-finished', {
         status: 'failed',

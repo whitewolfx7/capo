@@ -108,6 +108,10 @@ describe('acceptance: limit-triggered switch from Claude to Codex', () => {
     await cp(EXAMPLE_DIR, workspace, { recursive: true });
 
     await git(workspace, ['init', '-b', 'main']);
+    // Repo-local, so this passes both on a laptop with a global git identity
+    // and on CI without one -- the run's own preflight requires it.
+    await git(workspace, ['config', 'user.email', IDENTITY.email]);
+    await git(workspace, ['config', 'user.name', IDENTITY.name]);
     await git(workspace, ['add', '-A']);
     await commitAll(workspace, 'initial commit: two broken helpers', IDENTITY);
 

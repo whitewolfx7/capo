@@ -68,6 +68,16 @@ export interface IntegrationReport {
  * every task has been attempted, `checkCommand` runs once against the
  * combined tree.
  */
+/** Whether a merge is actually in progress (MERGE_HEAD exists). */
+async function inMerge(worktree: string): Promise<boolean> {
+  try {
+    await git(worktree, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function integrate(opts: {
   repo: string;
   runDir: string;
@@ -102,10 +112,20 @@ export async function integrate(opts: {
         'merge', '--no-ff', '--no-edit', sub.resultCommit,
       ]);
       merged.push(task.id);
-    } catch {
+    } catch (err) {
+      // A failed merge is not automatically a conflict. Git refuses to merge
+      // for reasons that have nothing to do with the diffs -- no configured
+      // committer identity being the one that actually bit -- and those leave
+      // no MERGE_HEAD behind, so the `merge --abort` that used to follow
+      // unconditionally threw a second error out of this function and lost
+      // every task's outcome with it. Only an in-progress merge is aborted,
+      // and only a merge that really conflicted is reported as one.
       const filesOut = await git(worktree, ['diff', '--name-only', '--diff-filter=U']);
       const files = filesOut.length === 0 ? [] : filesOut.split('\n');
-      await git(worktree, ['merge', '--abort']);
+      const mid = await inMerge(worktree);
+      if (mid) await git(worktree, ['merge', '--abort']);
+
+      if (!mid && files.length === 0) throw err;
       conflicted.push({ taskId: task.id, files });
     }
   }

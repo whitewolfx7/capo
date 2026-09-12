@@ -94,6 +94,37 @@ indefinitely — nothing watched for the case where no session is left alive to
 finish the work. Fixed: the last live session ending with the run unfinished
 now ends the run as `failed` and exits non-zero.
 
+## What CI then found
+
+Pushing the above turned CI red on four integration tests that passed on
+every developer machine. The cause was not the tests: a GitHub runner has no
+git identity configured, and CAPO's integration merge deliberately passes no
+identity of its own so that merge commits land as the user. So the merge
+failed with "Committer identity unknown".
+
+That alone would have been a legible failure. What made it a bug is what
+happened next: `integrate()` treated *any* failed merge as a conflict, and a
+merge that fails this way leaves no `MERGE_HEAD`, so the `git merge --abort`
+that followed threw a second error out of the function. The caller saw only
+that, and every task stayed at `review` with a failed run above it and no
+reason recorded anywhere. All the model work was done and none of its
+outcomes survived.
+
+Three fixes:
+
+- A merge that fails for a non-conflict reason is now re-thrown as itself
+  rather than reported as a conflict with no files, and `merge --abort` only
+  runs when a merge is actually in progress.
+- When integration cannot run at all, every task still in `review` gets a
+  note saying so, instead of a silent task table under a failed run.
+- `Orchestrator.start()` and `capo doctor` now check for a git identity up
+  front. It is not needed until integration, which is after every session has
+  finished — so without a preflight the cheapest possible failure is
+  discovered at the most expensive possible moment.
+
+Reproduced locally with `user.useConfigOnly=true` and no global config, which
+is what CI effectively is. The suite now passes under those conditions too.
+
 ## Still unproven
 
 - A run that spans a platform switch mid-task, end to end.

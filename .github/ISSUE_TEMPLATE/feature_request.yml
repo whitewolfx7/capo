@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest something CAPO should do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check `docs/roadmap.md` first. A lot of obvious-looking additions
+        are deliberately out of scope for v0.1, including per-task handoffs,
+        running both platforms concurrently, a long-running service, and an
+        adapter SDK. Saying why v0.1 should change its mind is more persuasive
+        than proposing the feature fresh.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that CAPO makes hard or impossible?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried or considered
+      description: Including whether an existing command nearly does it.

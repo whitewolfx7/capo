@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The default token gets read-only access. Nothing here writes to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor declared in package.json engines. 22 is current LTS.
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The suite is offline by design: no test may reach the network or drive
+      # a real platform CLI. Adapters are exercised against stubs and against
+      # captured real output in __fixtures__.
+      - name: Test
+        run: npm test
+
+      - name: Build plugin bundles
+        run: npm run build:plugins
+
+      # A bundle that only runs on the machine that built it is the failure
+      # this catches: it must start from outside the repository.
+      - name: Plugin bundles run standalone
+        run: |
+          cd "$(mktemp -d)"
+          node "$GITHUB_WORKSPACE/plugins/claude/capo/dist/capo.mjs" --version
+          node "$GITHUB_WORKSPACE/plugins/codex/capo/dist/capo.mjs" --version

@@ -1,5 +1,9 @@
 # CAPO
 
+[![CI](https://github.com/whitewolfx7/capo/actions/workflows/ci.yml/badge.svg)](https://github.com/whitewolfx7/capo/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/whitewolfx7/capo/actions/workflows/codeql.yml/badge.svg)](https://github.com/whitewolfx7/capo/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **You run out of Claude Pro usage at 2pm. Your Codex quota is untouched. CAPO
 moves the whole agent team over and keeps going.**
 
@@ -245,6 +249,19 @@ npm run build:plugins
 Design is in [docs/architecture.md](docs/architecture.md), the full future
 design in [docs/roadmap.md](docs/roadmap.md), and the build plan in
 [docs/superpowers/plans/](docs/superpowers/plans).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The one rule worth reading before you
+touch an adapter: a stub proves almost nothing here, and
+[docs/notes/codex-live-findings.md](docs/notes/codex-live-findings.md) explains
+why in detail.
+
+Security issues go through
+[private vulnerability reporting](https://github.com/whitewolfx7/capo/security/advisories/new),
+not public issues. See [SECURITY.md](SECURITY.md).
+
+By participating you agree to the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

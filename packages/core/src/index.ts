@@ -12,6 +12,7 @@ export * from './adapters/claude.js';
 export * from './adapters/codex.js';
 export * from './adapters/reset-time.js';
 export * from './orchestrator/prompt.js';
+export * from './orchestrator/result.js';
 export * from './orchestrator/run.js';
 export * from './integrate/merge.js';
 // NOTE: ./adapters/conformance.js is deliberately NOT exported. It imports

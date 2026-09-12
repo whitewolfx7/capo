@@ -15,7 +15,12 @@ scope that goes with each one — read it before you do anything else.
   piece to a **worker** — your host's native subagent mechanism (the Agent
   tool in Claude Code, Codex's own subagent support). Workers are not
   separate CAPO sessions; they live and die inside your conversation, and
-  their output comes back to you, not to the root.
+  their output comes back to you, not to the root. Your prompt's
+  `## Delegating to workers` section (when present) hands you the worker role
+  instructions to brief every worker with, and the model to ask your subagent
+  tooling for when you spawn one — CAPO cannot force a subagent to run on a
+  particular model, only ask for it through you, so treat that as a request
+  and proceed even if your tooling can't honor it.
 - **Your write scope, and nothing outside it.** Every task you own declares a
   write scope: the paths you and your workers are allowed to touch. Treat it
   as a hard boundary, not a guideline. CAPO independently checks the diff

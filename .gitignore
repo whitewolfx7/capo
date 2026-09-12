@@ -12,3 +12,6 @@ packages/*/dist/
 coverage/
 .DS_Store
 *.log
+
+# Per-machine Claude Code permissions, not part of the project.
+.claude/settings.local.json

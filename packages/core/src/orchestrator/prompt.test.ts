@@ -133,3 +133,26 @@ describe('buildSystemPrompt worker delegation', () => {
     expect(out).not.toContain('## Delegating to workers');
   });
 });
+
+describe('buildSystemPrompt result protocol', () => {
+  // The result protocol existed, was unit-tested, and was reachable from
+  // nowhere: no session was ever told it, so no result could ever arrive and
+  // integration could never fire. These pin the wiring, not the wording.
+  it('tells a coordinator how to report a finished task', () => {
+    const md = build();
+    expect(md).toContain('# Result: <task id>');
+    expect(md).toMatch(/result protocol/i);
+  });
+
+  it('says a result is unprompted, since CAPO never asks for one', () => {
+    expect(build()).toMatch(/never asks/i);
+  });
+
+  it('never gives the root a result protocol: it owns no task that could produce one', () => {
+    const md = buildSystemPrompt({
+      config: config(), role: 'root', sessionId: 'root',
+      contextFiles: [], roleInstructions: 'Own the table.',
+    });
+    expect(md).not.toContain('# Result: <task id>');
+  });
+});

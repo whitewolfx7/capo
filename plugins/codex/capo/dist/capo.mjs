@@ -7376,7 +7376,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 // packages/cli/dist/commands/run.js
 import { mkdir as mkdirFs } from "node:fs/promises";
-import { join as join10, resolve as resolve2 } from "node:path";
+import { join as join11, resolve as resolve2 } from "node:path";
 
 // packages/core/dist/types.js
 var CapoError = class extends Error {
@@ -11490,6 +11490,12 @@ var configFileSchema = external_exports.object({
   // Set `autonomy: supervised` for a dry run: sessions read and plan but do
   // not write.
   autonomy: external_exports.enum(["supervised", "autonomous"]).default("autonomous"),
+  // The combined check integration runs once, over the fully integrated
+  // tree, after every task's result has merged -- e.g. ["npm", "test"].
+  // argv, not a shell string. No sensible non-empty default exists: CAPO
+  // cannot guess how a project verifies itself. An empty array (the
+  // default) means integration accepts a clean merge on its own.
+  check_command: external_exports.array(external_exports.string()).default([]),
   limits: external_exports.object({
     max_workers_per_coordinator: external_exports.number().int().positive().default(2)
   }).strict().default({})
@@ -11544,6 +11550,7 @@ async function loadConfig(configPath) {
     transcripts: file.transcripts,
     stallTimeoutMs: file.stall_timeout_ms,
     autonomy: file.autonomy,
+    checkCommand: file.check_command,
     limits: { maxWorkersPerCoordinator: file.limits.max_workers_per_coordinator }
   };
   return Object.freeze(cfg);
@@ -11801,10 +11808,10 @@ function renderStatusMarkdown(state) {
   if (tasks.length === 0) {
     lines.push("_no tasks registered yet_");
   } else {
-    lines.push("| task | coordinator | state | write scope | result |");
-    lines.push("| --- | --- | --- | --- | --- |");
+    lines.push("| task | coordinator | state | write scope | result | note |");
+    lines.push("| --- | --- | --- | --- | --- | --- |");
     for (const t of tasks) {
-      lines.push(`| ${t.id} | ${t.coordinator} | ${t.state} | ${t.writeScope.join(", ")} | ${t.resultCommit ?? "-"} |`);
+      lines.push(`| ${t.id} | ${t.coordinator} | ${t.state} | ${t.writeScope.join(", ")} | ${t.resultCommit ?? "-"} | ${t.note ?? "-"} |`);
     }
   }
   lines.push("");
@@ -12095,6 +12102,53 @@ async function headCommit(repo) {
 }
 async function addWorktree(repo, path, branch, base) {
   await git(repo, ["worktree", "add", "-b", branch, path, base]);
+}
+var ALREADY_GONE = [/is not a working tree/, /No such file or directory/];
+async function removeWorktree(repo, path) {
+  try {
+    await git(repo, ["worktree", "remove", "--force", path]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!ALREADY_GONE.some((re) => re.test(message)))
+      throw err;
+  }
+  await git(repo, ["worktree", "prune"]);
+}
+function identityArgs(identity) {
+  if (!identity)
+    return [];
+  return [
+    "-c",
+    `user.email=${identity.email}`,
+    "-c",
+    `user.name=${identity.name}`,
+    "-c",
+    "commit.gpgsign=false"
+  ];
+}
+async function changedPaths(repo, base, head) {
+  const out = await git(repo, ["diff", "--name-only", "--find-renames", base, head]);
+  if (out.length === 0)
+    return [];
+  return out.split("\n").map((p) => p.replace(/\\/g, "/"));
+}
+
+// packages/core/dist/git/scope.js
+function normalize(p) {
+  const posix = p.replace(/\\/g, "/");
+  return posix.startsWith("./") ? posix.slice(2) : posix;
+}
+var inScope = (p, s) => s.endsWith("/") ? p.startsWith(s) : p === s;
+function checkScope(paths, scope) {
+  const normalizedScope = scope.map(normalize);
+  const violations = [];
+  for (const rawPath of paths) {
+    const path = normalize(rawPath);
+    const allowed = normalizedScope.some((s) => inScope(path, s));
+    if (!allowed)
+      violations.push(rawPath);
+  }
+  return { ok: violations.length === 0, violations };
 }
 
 // packages/core/dist/adapters/lines.js
@@ -13057,6 +13111,74 @@ function composeFirstTurn(opts) {
 
 // packages/core/dist/orchestrator/prompt.js
 import { readFileSync } from "node:fs";
+
+// packages/core/dist/orchestrator/result.js
+var HEADING_PREFIX = "# Result: ";
+var RESULT_PROTOCOL = [
+  "When a task you own is complete and its work is committed in your task worktree,",
+  "report it by replying with nothing else: a single fenced ```markdown code block,",
+  "in exactly this shape:",
+  "",
+  "```markdown",
+  "# Result: <task id>",
+  "task: <task id>",
+  "commit: <the commit sha in your task worktree>",
+  "",
+  "## Evidence",
+  '(what you ran and what it showed: tests, output, anything that backs up "done")',
+  "```",
+  "",
+  "Do not write anything before or after the fenced block. CAPO fills in every",
+  "fact it already knows itself (which task this is, its base commit); only the",
+  "commit sha and the evidence narrative are yours to report."
+].join("\n");
+function extractResult(text) {
+  const fenceRe = /```[^\n`]*\n([\s\S]*?)\n```/g;
+  let match;
+  while ((match = fenceRe.exec(text)) !== null) {
+    const body = match[1];
+    if (body !== void 0 && body.startsWith(HEADING_PREFIX)) {
+      return body;
+    }
+  }
+  return void 0;
+}
+function parseHeaderLine(line) {
+  const idx = line.indexOf(":");
+  if (idx === -1)
+    return void 0;
+  return [line.slice(0, idx).trim(), line.slice(idx + 1).trim()];
+}
+function parseResult(markdown) {
+  const lines = markdown.split("\n");
+  const firstLine = lines[0] ?? "";
+  if (!firstLine.startsWith(HEADING_PREFIX)) {
+    throw new CapoError('not a result: missing "# Result:" heading');
+  }
+  const titleTaskId = firstLine.slice(HEADING_PREFIX.length).trim();
+  const header = {};
+  let i = 1;
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === void 0 || /^## /.test(line))
+      break;
+    if (line.trim() === "")
+      continue;
+    const parsed = parseHeaderLine(line);
+    if (parsed)
+      header[parsed[0]] = parsed[1];
+  }
+  const rest = lines.slice(i).join("\n");
+  const evidenceMatch = rest.match(/## Evidence\n?([\s\S]*)/);
+  const evidence = evidenceMatch?.[1]?.trim() ?? "";
+  return {
+    taskId: header["task"] || titleTaskId,
+    resultCommit: header["commit"] ?? "",
+    evidence
+  };
+}
+
+// packages/core/dist/orchestrator/prompt.js
 var CHECKPOINT_REQUEST = [
   "CAPO is pausing this run to switch platforms.",
   "Reply with nothing else: a single fenced ```markdown code block containing your checkpoint,",
@@ -13076,7 +13198,7 @@ function extractCheckpoint(text) {
   return void 0;
 }
 function buildSystemPrompt(input) {
-  const { config, role, sessionId, contextFiles, roleInstructions, checkpoint } = input;
+  const { config, role, sessionId, contextFiles, roleInstructions, checkpoint, platform } = input;
   const sections = [];
   const objectiveBody = readFileSync(config.objective, "utf8").trim();
   sections.push(`## Objective
@@ -13089,6 +13211,9 @@ ${file.body.trim()}`);
   }
   sections.push(`## Your ownership
 ${renderOwnership(config, role, sessionId)}`);
+  if (role === "coordinator" && platform !== void 0) {
+    sections.push(renderWorkerDelegation(config, platform));
+  }
   if (checkpoint) {
     sections.push([
       "## Your checkpoint from the previous platform",
@@ -13127,13 +13252,36 @@ function renderOwnership(config, role, sessionId) {
   lines.push("Checkpoint protocol: when CAPO sends you the message below, reply with nothing but the fenced checkpoint block it asks for. This is how your work survives a platform switch.");
   lines.push("---");
   lines.push(CHECKPOINT_REQUEST);
+  if (role !== "root") {
+    lines.push("");
+    lines.push("Result protocol: unlike a checkpoint, CAPO never asks for this. Send one yourself, on your own schedule, as soon as a task you own is finished and committed. Until you do, CAPO has no way to know the task is done, and the run will not finish.");
+    lines.push("---");
+    lines.push(RESULT_PROTOCOL);
+  }
+  return lines.join("\n");
+}
+function renderWorkerDelegation(config, platform) {
+  const workerInstructions = readFileSync(config.roles.worker, "utf8").trim();
+  const workerModel = config.models.worker[platform];
+  const lines = [];
+  lines.push("## Delegating to workers");
+  lines.push("You spawn workers yourself, using your host's native subagent mechanism (the Agent tool in Claude Code, Codex's own subagent support). CAPO does not spawn workers and has no way to launch or control one directly -- this section is the only way it can reach a worker at all: by handing you what a worker should be told and asking you to pass it on.");
+  lines.push("");
+  lines.push("Brief every worker you spawn with the role instructions below, adapted to the specific piece of work you are delegating and to the write scope you are handing it (a subset of your own, inside your worktree). They describe what a worker owns, how it should work, and how it reports back to you:");
+  lines.push("");
+  lines.push("### Worker role instructions");
+  lines.push(workerInstructions);
+  if (workerModel !== void 0) {
+    lines.push("");
+    lines.push(`When you spawn a worker, ask your subagent tooling for the "${workerModel}" model -- that is what this run's config designates for workers on this platform. Treat this as a request, not a guarantee: CAPO does not launch the worker itself, so it cannot enforce the platform's model choice, only ask for it through you. If your tooling has no way to request a model, or ignores the request, proceed anyway rather than blocking the work on it.`);
+  }
   return lines.join("\n");
 }
 
 // packages/core/dist/orchestrator/run.js
 import { EventEmitter } from "node:events";
 import { readFile as readFile4, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 
 // packages/core/dist/orchestrator/transcript.js
 import { appendFile, mkdir as mkdir3 } from "node:fs/promises";
@@ -13212,6 +13360,86 @@ async function appendTranscript(runDir2, sessionId, text) {
   }
 }
 
+// packages/core/dist/integrate/merge.js
+import { execFile as execFileCb2 } from "node:child_process";
+import { promisify as promisify3 } from "node:util";
+import { basename, join as join5 } from "node:path";
+var execFile3 = promisify3(execFileCb2);
+var MAX_BUFFER2 = 16 * 1024 * 1024;
+async function acceptResult(repo, task, sub) {
+  if (sub.baseCommit !== task.baseCommit) {
+    return {
+      accepted: false,
+      reason: `submitted base ${sub.baseCommit} does not match the task's recorded base ${task.baseCommit}`,
+      violations: []
+    };
+  }
+  try {
+    await git(repo, ["cat-file", "-e", `${sub.resultCommit}^{commit}`]);
+  } catch {
+    return { accepted: false, reason: "result commit not found", violations: [] };
+  }
+  const paths = await changedPaths(repo, sub.baseCommit, sub.resultCommit);
+  const { ok, violations } = checkScope(paths, task.writeScope);
+  if (!ok) {
+    return { accepted: false, reason: "result writes outside its approved write scope", violations };
+  }
+  return { accepted: true, violations: [] };
+}
+async function integrate(opts) {
+  const { repo, runDir: runDir2, baseCommit, tasks, submissions, checkCommand, identity } = opts;
+  const worktree = join5(runDir2, "integration");
+  const branch = `capo/integration/${basename(runDir2)}`;
+  await removeWorktree(repo, worktree);
+  await addWorktree(repo, worktree, branch, baseCommit);
+  const merged = [];
+  const conflicted = [];
+  for (const task of tasks) {
+    const sub = submissions.get(task.id);
+    if (!sub)
+      continue;
+    try {
+      await git(worktree, [
+        ...identityArgs(identity),
+        "merge",
+        "--no-ff",
+        "--no-edit",
+        sub.resultCommit
+      ]);
+      merged.push(task.id);
+    } catch {
+      const filesOut = await git(worktree, ["diff", "--name-only", "--diff-filter=U"]);
+      const files = filesOut.length === 0 ? [] : filesOut.split("\n");
+      await git(worktree, ["merge", "--abort"]);
+      conflicted.push({ taskId: task.id, files });
+    }
+  }
+  let checksPassed = true;
+  let checkOutput = "";
+  if (checkCommand && checkCommand.length > 0) {
+    const [cmd, ...args] = checkCommand;
+    try {
+      const { stdout, stderr } = await execFile3(cmd, args, { cwd: worktree, maxBuffer: MAX_BUFFER2 });
+      checkOutput = `${stdout}${stderr}`;
+    } catch (err) {
+      checksPassed = false;
+      checkOutput = execErrorOutput(err);
+    }
+  }
+  return { merged, conflicted, checksPassed, checkOutput };
+}
+function execErrorOutput(err) {
+  if (err && typeof err === "object") {
+    const e = err;
+    const combined = `${e.stdout ?? ""}${e.stderr ?? ""}`;
+    if (combined.length > 0)
+      return combined;
+    if (typeof e.message === "string")
+      return e.message;
+  }
+  return String(err);
+}
+
 // packages/core/dist/orchestrator/run.js
 var CHECKPOINT_TIMEOUT_MS = 6e4;
 var Orchestrator = class {
@@ -13223,6 +13451,14 @@ var Orchestrator = class {
   #log;
   #live = /* @__PURE__ */ new Map();
   #pending = /* @__PURE__ */ new Map();
+  // Accepted-shape results, keyed by task id, kept in memory as they arrive
+  // (see `#handleResult`). Rebuilt from `state.json` on construction so a
+  // resumed orchestrator does not lose results a dead process already
+  // recorded -- only the in-memory bookkeeping that would otherwise re-fire
+  // integration is reconstructed; the tasks themselves, and their
+  // `resultCommit`/`evidence`, already live in state.
+  #submissions = /* @__PURE__ */ new Map();
+  #integrating = false;
   // Stall watchdog bookkeeping. `#lastEventAt` and `#stalledSet` are kept
   // in-memory only and rebuilt from `#live` as sessions launch and close --
   // unlike everything reached through `#update`, they are not part of
@@ -13245,6 +13481,16 @@ var Orchestrator = class {
     this.#stallPollMs = opts.stallPollMs ?? 1e3;
     this.events.setMaxListeners(0);
     this.#startStallWatch();
+    for (const task of Object.values(this.#state.get().tasks)) {
+      if (task.state === "review" && task.resultCommit !== void 0) {
+        this.#submissions.set(task.id, {
+          taskId: task.id,
+          baseCommit: task.baseCommit ?? "",
+          resultCommit: task.resultCommit,
+          evidence: task.evidence ?? ""
+        });
+      }
+    }
   }
   /**
    * Resolves the workspace's HEAD, records it as the run's base commit,
@@ -13261,7 +13507,7 @@ var Orchestrator = class {
   async #update(fn) {
     const next = await this.#state.update(fn);
     try {
-      await writeFile2(join5(this.#runDir, "STATUS.md"), renderStatusMarkdown(next), "utf8");
+      await writeFile2(join6(this.#runDir, "STATUS.md"), renderStatusMarkdown(next), "utf8");
     } catch {
     }
     return next;
@@ -13270,7 +13516,7 @@ var Orchestrator = class {
     const base = await headCommit(this.#config.workspace);
     const taskRecords = [];
     for (const task of this.#config.tasks) {
-      const worktree = join5(this.#runDir, "worktrees", task.id);
+      const worktree = join6(this.#runDir, "worktrees", task.id);
       const branch = `capo/${this.#state.get().runId}/${task.id}`;
       await addWorktree(this.#config.workspace, worktree, branch, base);
       taskRecords.push({
@@ -13314,6 +13560,7 @@ var Orchestrator = class {
     const set = await latestCheckpointSet(this.#runDir);
     if (!set) {
       await this.#launchAll(platform);
+      void this.#maybeIntegrate();
       return void 0;
     }
     const checkpoints = /* @__PURE__ */ new Map();
@@ -13330,6 +13577,7 @@ var Orchestrator = class {
     });
     await this.#launchAll(platform, checkpoints);
     this.events.emit("resumed", { index: set.index, platform });
+    void this.#maybeIntegrate();
     return set.index;
   }
   /**
@@ -13632,7 +13880,8 @@ var Orchestrator = class {
       sessionId,
       contextFiles,
       roleInstructions,
-      checkpoint
+      checkpoint,
+      platform
     });
     const opts = {
       sessionId,
@@ -13658,6 +13907,13 @@ var Orchestrator = class {
         platformSessionId: session.platformSessionId,
         status: "starting"
       };
+      if (role === "coordinator") {
+        for (const task of Object.values(draft.tasks)) {
+          if (task.coordinator === sessionId && task.state === "ready") {
+            task.state = "running";
+          }
+        }
+      }
     });
     void this.#pump(sessionId, platform, session);
   }
@@ -13709,6 +13965,10 @@ var Orchestrator = class {
             resolver(parseCheckpoint(block));
           }
         }
+        const resultBlock = extractResult(event.text);
+        if (resultBlock !== void 0) {
+          await this.#handleResult(sessionId, resultBlock);
+        }
         break;
       }
       case "tool": {
@@ -13746,13 +14006,192 @@ var Orchestrator = class {
       }
     }
   }
+  /**
+   * A coordinator's own report never marks a task done -- that is the whole
+   * point of `acceptResult`/`integrate` running independently in
+   * `#runIntegration`. This only turns a session's fenced reply into a
+   * `ResultSubmission` CAPO trusts the shape of, and moves the task to
+   * `review` so a person (and `#maybeIntegrate`) can see it is waiting on
+   * integration, not still in flight.
+   *
+   * `taskId` is resolved from CAPO's own task table whenever that is
+   * unambiguous (a coordinator owning exactly one task), the same way
+   * `#stampCheckpoint` prefers what CAPO already knows over what a session
+   * claims. Only when a coordinator owns several tasks -- genuinely
+   * ambiguous, see `#cwdFor` -- is the session's own claim used, and even
+   * then only to pick among tasks it actually owns.
+   */
+  async #handleResult(sessionId, block) {
+    let raw;
+    try {
+      raw = parseResult(block);
+    } catch (err) {
+      this.#log(`[${sessionId}] could not parse result: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    const state = this.#state.get();
+    const owned = Object.values(state.tasks).filter((t) => t.coordinator === sessionId);
+    const task = owned.length === 1 ? owned[0] : owned.find((t) => t.id === raw.taskId);
+    if (!task) {
+      this.#log(`[${sessionId}] result names task "${raw.taskId}", which it does not own; ignored`);
+      return;
+    }
+    if (task.state === "done" || task.state === "failed") {
+      this.#log(`[${sessionId}] result for task "${task.id}" ignored: already ${task.state}`);
+      return;
+    }
+    const submission = {
+      taskId: task.id,
+      baseCommit: task.baseCommit ?? state.baseCommit,
+      resultCommit: raw.resultCommit,
+      evidence: raw.evidence
+    };
+    this.#submissions.set(task.id, submission);
+    await this.#update((draft) => {
+      const t = draft.tasks[task.id];
+      if (t) {
+        t.state = "review";
+        t.resultCommit = submission.resultCommit;
+        t.evidence = submission.evidence;
+      }
+    });
+    this.#log(`[${sessionId}] result received for task "${task.id}" (${submission.resultCommit})`);
+    this.events.emit("result-received", {
+      taskId: task.id,
+      sessionId,
+      resultCommit: submission.resultCommit
+    });
+    await this.#maybeIntegrate();
+  }
+  /**
+   * Fires integration once every currently-known task has either a
+   * submission in hand or has already been resolved by a previous
+   * integration attempt. Guarded against re-entry (`#integrating`) and
+   * against a switch in flight: a result arriving mid-checkpoint should wait
+   * for the switch to land rather than race it.
+   */
+  async #maybeIntegrate() {
+    if (this.#integrating || this.#switching)
+      return;
+    const state = this.#state.get();
+    if (state.status === "done" || state.status === "failed")
+      return;
+    const tasks = Object.values(state.tasks);
+    if (tasks.length === 0)
+      return;
+    const allReported = tasks.every((t) => this.#submissions.has(t.id) || t.state === "done" || t.state === "failed");
+    if (!allReported)
+      return;
+    this.#integrating = true;
+    try {
+      await this.#runIntegration(state, tasks);
+    } finally {
+      this.#integrating = false;
+    }
+  }
+  /**
+   * The root integrates: `acceptResult` re-checks each submission
+   * independently of the coordinator's own claim (out-of-scope diffs,
+   * including renames, are rejected outright and never reach `integrate`),
+   * then `integrate` merges what is left, one task at a time, and runs
+   * `config.checkCommand` once over the combined tree.
+   *
+   * The run finishes here: every task's outcome is written back, the run's
+   * own status becomes `done` (a clean merge and a passing combined check)
+   * or `failed` (a rejection, a conflict, or a failing check), and every
+   * live session is closed -- there is nothing left for any of them to do.
+   */
+  async #runIntegration(state, tasks) {
+    const accepted = /* @__PURE__ */ new Map();
+    const rejections = [];
+    for (const task of tasks) {
+      const sub = this.#submissions.get(task.id);
+      if (!sub)
+        continue;
+      const outcome = await acceptResult(this.#config.workspace, task, sub);
+      if (outcome.accepted) {
+        accepted.set(task.id, sub);
+      } else {
+        rejections.push({ taskId: task.id, reason: outcome.reason ?? "result rejected" });
+      }
+    }
+    let report;
+    try {
+      report = await integrate({
+        repo: this.#config.workspace,
+        runDir: this.#runDir,
+        baseCommit: state.baseCommit,
+        tasks,
+        submissions: accepted,
+        checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : void 0
+      });
+    } catch (err) {
+      this.#log(`integration failed to run: ${err instanceof Error ? err.message : String(err)}`);
+      await this.#update((draft) => {
+        draft.status = "failed";
+      });
+      this.events.emit("integration-finished", {
+        status: "failed",
+        merged: [],
+        conflicted: [],
+        rejections,
+        checksPassed: false
+      });
+      return;
+    }
+    const mergedSet = new Set(report.merged);
+    const conflictedByTask = new Map(report.conflicted.map((c) => [c.taskId, c.files]));
+    const liveEntries = [...this.#live.entries()];
+    await this.#update((draft) => {
+      for (const task of tasks) {
+        const t = draft.tasks[task.id];
+        if (!t)
+          continue;
+        const rejection = rejections.find((r) => r.taskId === task.id);
+        if (rejection) {
+          t.state = "failed";
+          t.note = `result rejected: ${rejection.reason}`;
+          continue;
+        }
+        const conflictFiles = conflictedByTask.get(task.id);
+        if (conflictFiles) {
+          t.state = "failed";
+          t.note = `merge conflict in: ${conflictFiles.join(", ") || "(unknown files)"}`;
+          continue;
+        }
+        if (mergedSet.has(task.id)) {
+          t.state = report.checksPassed ? "done" : "failed";
+          if (!report.checksPassed)
+            t.note = "merged, but the combined check command failed";
+        }
+      }
+      const anyFailed = Object.values(draft.tasks).some((t) => t.state === "failed");
+      draft.status = anyFailed ? "failed" : "done";
+      for (const [sessionId] of liveEntries) {
+        const record = draft.sessions[sessionId];
+        if (record)
+          record.status = "stopped";
+      }
+    });
+    await Promise.all(liveEntries.map(([, live]) => live.session.close().catch(() => {
+    })));
+    for (const [sessionId] of liveEntries) {
+      this.#live.delete(sessionId);
+      this.#lastEventAt.delete(sessionId);
+      this.#stalledSet.delete(sessionId);
+    }
+    this.#stopStallWatch();
+    const finalStatus = this.#state.get().status;
+    this.#log(`integration finished: run ${finalStatus} (merged ${report.merged.length}/${tasks.length})`);
+    this.events.emit("integration-finished", {
+      status: finalStatus,
+      merged: report.merged,
+      conflicted: report.conflicted,
+      rejections,
+      checksPassed: report.checksPassed
+    });
+  }
 };
-
-// packages/core/dist/integrate/merge.js
-import { execFile as execFileCb2 } from "node:child_process";
-import { promisify as promisify3 } from "node:util";
-var execFile3 = promisify3(execFileCb2);
-var MAX_BUFFER2 = 16 * 1024 * 1024;
 
 // packages/cli/dist/lib/errors.js
 function reportError(err, io) {
@@ -13769,7 +14208,7 @@ function reportError(err, io) {
 
 // packages/cli/dist/lib/orchestrator-setup.js
 import { mkdir as mkdir4, readFile as readFile6, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 
 // packages/cli/dist/lib/adapters.js
 function buildAdapters(platforms) {
@@ -13794,9 +14233,9 @@ function adapterFor(id, driver) {
 
 // packages/cli/dist/lib/logger.js
 import { createWriteStream } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 function makeFileLogger(dir) {
-  const stream = createWriteStream(join6(dir, "run.log"), { flags: "a" });
+  const stream = createWriteStream(join7(dir, "run.log"), { flags: "a" });
   return (line) => {
     stream.write(`${line}
 `);
@@ -13805,10 +14244,10 @@ function makeFileLogger(dir) {
 
 // packages/cli/dist/lib/pid.js
 import { readFile as readFile5, rm, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 var PID_FILE = "orchestrator.pid";
 function pidFilePath(dir) {
-  return join7(dir, PID_FILE);
+  return join8(dir, PID_FILE);
 }
 async function writePidFile(dir, pid = process.pid) {
   await writeFile3(pidFilePath(dir), String(pid), "utf8");
@@ -13842,7 +14281,7 @@ async function createRun(config, startOn) {
   const runId = await allocateRunId(config.workspace);
   const dir = runDir(config.workspace, runId);
   await mkdir4(dir, { recursive: true });
-  await writeFile4(join8(dir, "config.resolved.json"), JSON.stringify(config, null, 2), "utf8");
+  await writeFile4(join9(dir, "config.resolved.json"), JSON.stringify(config, null, 2), "utf8");
   const activePlatform = startOn ?? config.startOn;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const initial = {
@@ -13870,7 +14309,7 @@ async function createRun(config, startOn) {
   return { orchestrator, store, dir, runId };
 }
 async function reopenRun(dir) {
-  const raw = await readFile6(join8(dir, "config.resolved.json"), "utf8");
+  const raw = await readFile6(join9(dir, "config.resolved.json"), "utf8");
   const config = JSON.parse(raw);
   const store = await StateStore.open(dir);
   const orchestrator = new Orchestrator({
@@ -13888,10 +14327,10 @@ import { readFile as readFile7 } from "node:fs/promises";
 
 // packages/cli/dist/lib/control.js
 import { writeFile as writeFile5 } from "node:fs/promises";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var CONTROL_FILE = "control.json";
 function controlFilePath(dir) {
-  return join9(dir, CONTROL_FILE);
+  return join10(dir, CONTROL_FILE);
 }
 async function writeControlRequest(dir, req) {
   await writeFile5(controlFilePath(dir), JSON.stringify(req, null, 2), "utf8");
@@ -13906,21 +14345,31 @@ function blockUntilStopped(orchestrator, dir, log) {
       void handleControlSignal(orchestrator, dir, log);
     };
     let stopping = false;
+    const teardown = () => {
+      process.off("SIGUSR2", onControlSignal);
+      process.off("SIGINT", onStopSignal);
+      process.off("SIGTERM", onStopSignal);
+      orchestrator.events.off("integration-finished", onIntegrationFinished);
+      clearInterval(keepAlive);
+      void clearPidFile(dir).finally(resolve4);
+    };
     const onStopSignal = () => {
       if (stopping)
         return;
       stopping = true;
-      process.off("SIGUSR2", onControlSignal);
-      process.off("SIGINT", onStopSignal);
-      process.off("SIGTERM", onStopSignal);
-      orchestrator.stop().catch((err) => log(`stop error: ${err instanceof Error ? err.message : String(err)}`)).finally(() => {
-        clearInterval(keepAlive);
-        void clearPidFile(dir).finally(resolve4);
-      });
+      orchestrator.stop().catch((err) => log(`stop error: ${err instanceof Error ? err.message : String(err)}`)).finally(teardown);
+    };
+    const onIntegrationFinished = (report) => {
+      if (stopping)
+        return;
+      stopping = true;
+      log(`run ${report.status}`);
+      teardown();
     };
     process.on("SIGUSR2", onControlSignal);
     process.on("SIGINT", onStopSignal);
     process.on("SIGTERM", onStopSignal);
+    orchestrator.events.once("integration-finished", onIntegrationFinished);
   });
 }
 async function handleControlSignal(orchestrator, dir, log) {
@@ -14010,14 +14459,14 @@ async function runDetached(config, opts, io, selfPath) {
   try {
     const predictedRunId = await allocateRunId(config.workspace);
     const dir = runDir(config.workspace, predictedRunId);
-    const logDir = join10(capoDir(config.workspace), "logs");
+    const logDir = join11(capoDir(config.workspace), "logs");
     await mkdirFs(logDir, { recursive: true });
-    const logPath = join10(logDir, `${predictedRunId}.log`);
+    const logPath = join11(logDir, `${predictedRunId}.log`);
     const args = ["run", "--config", resolve2(opts.config), "--foreground"];
     if (opts.startOn !== void 0)
       args.push("--start-on", opts.startOn);
     spawnDetached(selfPath, args, logPath);
-    const found = await waitForFile(join10(dir, "state.json"));
+    const found = await waitForFile(join11(dir, "state.json"));
     if (!found) {
       io.err(`the orchestrator did not start within 10s (no state.json under ${dir})`);
       io.err(`check its log: ${logPath}`);
@@ -14035,10 +14484,10 @@ import { resolve as resolve3 } from "node:path";
 
 // packages/cli/dist/lib/run-locate.js
 import { readdir as readdir3 } from "node:fs/promises";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 var RUN_ID_RE = /^\d{4}-\d{2}-\d{2}-\d{3}$/;
 async function latestRunId(workspace) {
-  const runsDir = join11(capoDir(workspace), "runs");
+  const runsDir = join12(capoDir(workspace), "runs");
   let entries;
   try {
     entries = await readdir3(runsDir);
@@ -14184,7 +14633,7 @@ async function runResume(opts, io) {
 // packages/cli/dist/commands/doctor.js
 import { execFile as execFileCb3 } from "node:child_process";
 import { mkdir as mkdir5, rm as rm2, writeFile as writeFile6 } from "node:fs/promises";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 import { promisify as promisify4 } from "node:util";
 var execFile4 = promisify4(execFileCb3);
 async function runDoctor(opts, io) {
@@ -14236,7 +14685,7 @@ async function checkGit() {
 }
 async function checkCapoWritable(workspace) {
   const dir = capoDir(workspace);
-  const probe = join12(dir, `.doctor-probe-${process.pid}`);
+  const probe = join13(dir, `.doctor-probe-${process.pid}`);
   try {
     await mkdir5(dir, { recursive: true });
     await writeFile6(probe, "ok", "utf8");

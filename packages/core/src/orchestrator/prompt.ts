@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import type { CapoConfig, Checkpoint, PlatformId, RoleName, SessionId } from '../types.js';
 import { renderCheckpoint } from '../checkpoint/render.js';
+import { RESULT_PROTOCOL } from './result.js';
 
 /**
  * Sent verbatim to a session to ask it to checkpoint. The session must reply
@@ -145,6 +146,19 @@ function renderOwnership(config: CapoConfig, role: RoleName, sessionId: SessionI
   );
   lines.push('---');
   lines.push(CHECKPOINT_REQUEST);
+
+  // Only a session that owns tasks can report a result: `#handleResult`
+  // resolves a result against the tasks whose `coordinator` is this session,
+  // and the root owns none of them. Telling the root a protocol it can never
+  // use would just be an instruction it is bound to misapply.
+  if (role !== 'root') {
+    lines.push('');
+    lines.push(
+      'Result protocol: unlike a checkpoint, CAPO never asks for this. Send one yourself, on your own schedule, as soon as a task you own is finished and committed. Until you do, CAPO has no way to know the task is done, and the run will not finish.',
+    );
+    lines.push('---');
+    lines.push(RESULT_PROTOCOL);
+  }
 
   return lines.join('\n');
 }

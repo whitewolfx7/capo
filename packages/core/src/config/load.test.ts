@@ -66,6 +66,17 @@ describe('loadConfig', () => {
     expect(cfg.limits.maxWorkersPerCoordinator).toBe(2);
   });
 
+  it('defaults checkCommand to empty, meaning no combined check', async () => {
+    const cfg = await loadConfig(await scaffold(VALID));
+    expect(cfg.checkCommand).toEqual([]);
+  });
+
+  it('parses a configured check_command as argv, not a shell string', async () => {
+    const p = await scaffold(`${VALID}\ncheck_command: ["npm", "test"]\n`);
+    const cfg = await loadConfig(p);
+    expect(cfg.checkCommand).toEqual(['npm', 'test']);
+  });
+
   it('rejects start_on naming an undeclared platform', async () => {
     const p = await scaffold(VALID.replace('start_on: claude', 'start_on: gemini'));
     await expect(loadConfig(p)).rejects.toThrow(/start_on.*gemini/i);

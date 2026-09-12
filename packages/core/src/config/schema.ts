@@ -73,6 +73,12 @@ export const configFileSchema = z
     // Set `autonomy: supervised` for a dry run: sessions read and plan but do
     // not write.
     autonomy: z.enum(['supervised', 'autonomous']).default('autonomous'),
+    // The combined check integration runs once, over the fully integrated
+    // tree, after every task's result has merged -- e.g. ["npm", "test"].
+    // argv, not a shell string. No sensible non-empty default exists: CAPO
+    // cannot guess how a project verifies itself. An empty array (the
+    // default) means integration accepts a clean merge on its own.
+    check_command: z.array(z.string()).default([]),
     limits: z
       .object({
         max_workers_per_coordinator: z.number().int().positive().default(2),

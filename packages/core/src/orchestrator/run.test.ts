@@ -95,11 +95,35 @@ function withDeadline<T>(promise: Promise<T>, label: string, ms = 5000): Promise
   ]);
 }
 
+/** Renders a fenced result block a coordinator's text output is expected to look like. */
+function resultBlock(taskId: string, commit: string, evidence = 'tests pass'): string {
+  return ['```markdown', `# Result: ${taskId}`, `task: ${taskId}`, `commit: ${commit}`, '', '## Evidence', evidence, '```'].join(
+    '\n',
+  );
+}
+
+/** Writes `relPath` in `worktree` and commits it, returning the new commit sha. */
+async function commitInWorktree(worktree: string, relPath: string, content: string): Promise<string> {
+  const dir = relPath.split('/').slice(0, -1).join('/');
+  if (dir) await mkdir(join(worktree, dir), { recursive: true });
+  await writeFile(join(worktree, relPath), content);
+  const sha = await commitAll(worktree, `work: ${relPath}`, { name: 't', email: 't@t' });
+  if (!sha) throw new Error(`commitInWorktree: nothing to commit for ${relPath}`);
+  return sha;
+}
+
+/** A path inside `task`'s own declared write scope, for a commit that must be accepted. */
+function inScopeFile(task: { id: string; writeScope: string[] }): string {
+  return `${task.writeScope[0]}${task.id}.txt`;
+}
+
 async function harness(
   makeAdapter: (id: string) => FakeAdapter = (id) => new ArmedFakeAdapter(id),
   /** Test-only seams for the stall watchdog: real milliseconds, not part of
    * CONFIG_YAML, so most tests never have to think about it. */
   watchdog: { stallTimeoutMs?: number; stallPollMs?: number } = {},
+  /** Extra raw YAML appended to CONFIG_YAML, e.g. a `check_command` line. */
+  extraYaml = '',
 ): Promise<{
   orch: Orchestrator;
   claude: FakeAdapter;
@@ -135,9 +159,9 @@ async function harness(
 
   const configPath = join(workspace, 'orchestration.yaml');
   const yaml =
-    watchdog.stallTimeoutMs === undefined
+    (watchdog.stallTimeoutMs === undefined
       ? CONFIG_YAML
-      : `${CONFIG_YAML}\nstall_timeout_ms: ${watchdog.stallTimeoutMs}\n`;
+      : `${CONFIG_YAML}\nstall_timeout_ms: ${watchdog.stallTimeoutMs}\n`) + extraYaml;
   await writeFile(configPath, yaml);
   const config = await loadConfig(configPath);
 
@@ -569,5 +593,193 @@ describe('sessions run in their own worktree', () => {
     const coordinators = claude.started.filter((s) => s.role === 'coordinator');
     expect(coordinators.length).toBeGreaterThan(1);
     expect(new Set(coordinators.map((s) => s.cwd)).size).toBe(coordinators.length);
+  });
+});
+
+describe('task state machine', () => {
+  it('moves a task from ready to running the moment its coordinator launches', async () => {
+    const { orch, state } = await harness();
+    await orch.start();
+    const tasks = Object.values(state.get().tasks);
+    expect(tasks.length).toBeGreaterThan(0);
+    for (const task of tasks) expect(task.state).toBe('running');
+  });
+
+  it('does not regress a task past ready on a relaunch after a switch', async () => {
+    const { orch, claude, codex, state } = await harness();
+    await orch.start();
+    claude.emit('root', { kind: 'usage-limit', raw: 'x' });
+    await withDeadline(once(orch.events, 'switched'), 'switched');
+    // The relaunch on codex reuses the same session ids; a task already
+    // `running` must not be reset by the second launch.
+    for (const task of Object.values(state.get().tasks)) expect(task.state).toBe('running');
+    expect(codex.started.map((s) => s.sessionId).sort()).toEqual(['root', 'team-a', 'team-b']);
+  });
+});
+
+describe('result submission', () => {
+  it('moves a task to review, records the commit and evidence, and emits result-received', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const task = Object.values(state.get().tasks)[0]!;
+    const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit(task.coordinator, { kind: 'text', text: resultBlock(task.id, sha, 'ran the tests, all green') });
+    const [payload] = (await received) as [{ taskId: string; sessionId: string; resultCommit: string }];
+
+    expect(payload.taskId).toBe(task.id);
+    expect(payload.resultCommit).toBe(sha);
+
+    const updated = state.get().tasks[task.id]!;
+    expect(updated.state).toBe('review');
+    expect(updated.resultCommit).toBe(sha);
+    expect(updated.evidence).toBe('ran the tests, all green');
+  });
+
+  it('resolves the task from ownership, not the session\'s own claim, when unambiguous', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const [taskA, taskB] = Object.values(state.get().tasks);
+    const shaA = await commitInWorktree(taskA!.worktree!, inScopeFile(taskA!), 'done\n');
+    // team-a owns only task-a. A block that names task-b (wrongly, or from a
+    // stale prompt) must still land on the task team-a actually owns -- the
+    // same trust boundary `#stampCheckpoint` draws for checkpoint metadata.
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit(taskA!.coordinator, { kind: 'text', text: resultBlock(taskB!.id, shaA) });
+    await received;
+    expect(state.get().tasks[taskA!.id]!.state).toBe('review');
+    expect(state.get().tasks[taskA!.id]!.resultCommit).toBe(shaA);
+    expect(state.get().tasks[taskB!.id]!.state).toBe('running');
+  });
+
+  it('does not crash the pump on a sparse result block, and ignores plain text with no fenced block', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const task = Object.values(state.get().tasks)[0]!;
+
+    // Well-formed heading, everything else blank: parseResult must not throw,
+    // and the lenient read still moves the task to review -- acceptResult is
+    // what actually catches an unusable (empty) commit sha, at integration time.
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit(task.coordinator, { kind: 'text', text: '```markdown\n# Result: \ntask:\n```' });
+    await received;
+    expect(state.get().tasks[task.id]!.state).toBe('review');
+
+    // Plain prose with no fenced block at all must never be mistaken for a result.
+    claude.emit(task.coordinator, { kind: 'text', text: 'still working on it' });
+    await settle();
+    expect(state.get().tasks[task.id]!.state).toBe('review');
+  });
+});
+
+describe('integration', () => {
+  it('integrates once every task has a result, marks everything done, and closes every session', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const tasks = Object.values(state.get().tasks);
+
+    const finished = withDeadline(once(orch.events, 'integration-finished'), 'integration-finished');
+    for (const task of tasks) {
+      const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+      claude.emit(task.coordinator, { kind: 'text', text: resultBlock(task.id, sha) });
+    }
+    const [report] = (await finished) as [{ status: string; merged: string[]; checksPassed: boolean }];
+
+    expect(report.status).toBe('done');
+    expect(report.merged.sort()).toEqual(tasks.map((t) => t.id).sort());
+    expect(report.checksPassed).toBe(true);
+    expect(state.get().status).toBe('done');
+    for (const task of tasks) expect(state.get().tasks[task.id]!.state).toBe('done');
+    expect(claude.closed.sort()).toEqual(['root', 'team-a', 'team-b']);
+  });
+
+  it('fails the task and the run when a result writes outside its declared scope', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const tasks = Object.values(state.get().tasks);
+    const [taskA, taskB] = tasks;
+
+    const finished = withDeadline(once(orch.events, 'integration-finished'), 'integration-finished');
+    // task-a's coordinator commits into task-b's territory: out of scope.
+    const badSha = await commitInWorktree(taskA!.worktree!, 'src/b/sneak.txt', 'sneaky\n');
+    const goodSha = await commitInWorktree(taskB!.worktree!, inScopeFile(taskB!), 'done\n');
+    claude.emit(taskA!.coordinator, { kind: 'text', text: resultBlock(taskA!.id, badSha) });
+    claude.emit(taskB!.coordinator, { kind: 'text', text: resultBlock(taskB!.id, goodSha) });
+    await finished;
+
+    expect(state.get().status).toBe('failed');
+    const failedTask = state.get().tasks[taskA!.id]!;
+    expect(failedTask.state).toBe('failed');
+    expect(failedTask.note).toMatch(/rejected/i);
+    expect(state.get().tasks[taskB!.id]!.state).toBe('done');
+  });
+
+  it('fails every merged task when the combined check command fails', async () => {
+    const { orch, claude, state } = await harness(
+      undefined,
+      {},
+      '\ncheck_command: ["node", "-e", "process.exit(1)"]\n',
+    );
+    await orch.start();
+    const tasks = Object.values(state.get().tasks);
+
+    const finished = withDeadline(once(orch.events, 'integration-finished'), 'integration-finished');
+    for (const task of tasks) {
+      const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+      claude.emit(task.coordinator, { kind: 'text', text: resultBlock(task.id, sha) });
+    }
+    const [report] = (await finished) as [{ status: string; checksPassed: boolean }];
+
+    expect(report.checksPassed).toBe(false);
+    expect(report.status).toBe('failed');
+    expect(state.get().status).toBe('failed');
+    for (const task of tasks) {
+      expect(state.get().tasks[task.id]!.state).toBe('failed');
+      expect(state.get().tasks[task.id]!.note).toMatch(/check/i);
+    }
+  });
+
+  it('does not integrate until every task has reported', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const [taskA] = Object.values(state.get().tasks);
+    const sha = await commitInWorktree(taskA!.worktree!, inScopeFile(taskA!), 'done\n');
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit(taskA!.coordinator, { kind: 'text', text: resultBlock(taskA!.id, sha) });
+    await received;
+    await settle();
+    expect(state.get().status).toBe('running');
+    expect(state.get().tasks[taskA!.id]!.state).toBe('review');
+  });
+
+  it('finishes integration on resume when a crash landed after every result but before integration ran', async () => {
+    const { orch, state, dir, config, adapters } = await harness();
+    await orch.start();
+    const tasks = Object.values(state.get().tasks);
+
+    const shas = new Map<string, string>();
+    for (const task of tasks) {
+      shas.set(task.id, await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n'));
+    }
+
+    // Simulate a crash that landed after every result was already durably
+    // recorded in state.json (exactly what `#handleResult` writes) but before
+    // the orchestrator got to integrate them.
+    await state.update((draft) => {
+      for (const task of Object.values(draft.tasks)) {
+        task.state = 'review';
+        task.resultCommit = shas.get(task.id);
+        task.evidence = 'tests pass';
+      }
+    });
+
+    const revived = new Orchestrator({ config, runDir: dir, state, adapters, log: () => {} });
+    const finished = withDeadline(once(revived.events, 'integration-finished'), 'integration-finished');
+    await revived.resume();
+    await finished;
+
+    expect(state.get().status).toBe('done');
+    for (const task of tasks) expect(state.get().tasks[task.id]!.state).toBe('done');
   });
 });

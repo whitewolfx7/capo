@@ -29,24 +29,45 @@ export function blockUntilStopped(orchestrator: Orchestrator, dir: string, log: 
     };
 
     let stopping = false;
-    const onStopSignal = (): void => {
-      if (stopping) return;
-      stopping = true;
+
+    /** Drop every handle and listener holding this process open, then resolve. */
+    const teardown = (): void => {
       process.off('SIGUSR2', onControlSignal);
       process.off('SIGINT', onStopSignal);
       process.off('SIGTERM', onStopSignal);
+      orchestrator.events.off('integration-finished', onIntegrationFinished);
+      clearInterval(keepAlive);
+      void clearPidFile(dir).finally(resolve);
+    };
+
+    const onStopSignal = (): void => {
+      if (stopping) return;
+      stopping = true;
       orchestrator
         .stop()
         .catch((err) => log(`stop error: ${err instanceof Error ? err.message : String(err)}`))
-        .finally(() => {
-          clearInterval(keepAlive);
-          void clearPidFile(dir).finally(resolve);
-        });
+        .finally(teardown);
+    };
+
+    // A run that integrates has finished on its own: every task is resolved
+    // and every session is already closed. Without this the keepalive above
+    // holds a finished run open forever, and the only way out is Ctrl-C.
+    //
+    // Deliberately not routed through `orchestrator.stop()`: the run's final
+    // status is already written, and `stop()` unconditionally sets it to
+    // "done" -- which would quietly relabel a failed integration as a
+    // success on the way out.
+    const onIntegrationFinished = (report: { status: string }): void => {
+      if (stopping) return;
+      stopping = true;
+      log(`run ${report.status}`);
+      teardown();
     };
 
     process.on('SIGUSR2', onControlSignal);
     process.on('SIGINT', onStopSignal);
     process.on('SIGTERM', onStopSignal);
+    orchestrator.events.once('integration-finished', onIntegrationFinished);
   });
 }
 

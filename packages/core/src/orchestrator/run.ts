@@ -20,6 +20,7 @@ import type {
   RunState,
   SessionId,
   StartSessionOptions,
+  TaskId,
   TaskRecord,
 } from '../types.js';
 import type { StateStore } from '../state/store.js';
@@ -35,6 +36,8 @@ import {
 import { parseCheckpoint } from '../checkpoint/render.js';
 import { headCommit, addWorktree } from '../git/repo.js';
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
+import { extractResult, parseResult } from './result.js';
+import { acceptResult, integrate, type IntegrationReport, type ResultSubmission } from '../integrate/merge.js';
 
 const CHECKPOINT_TIMEOUT_MS = 60_000;
 
@@ -72,6 +75,15 @@ export class Orchestrator {
   readonly #live = new Map<SessionId, LiveSession>();
   readonly #pending = new Map<SessionId, (cp: Checkpoint) => void>();
 
+  // Accepted-shape results, keyed by task id, kept in memory as they arrive
+  // (see `#handleResult`). Rebuilt from `state.json` on construction so a
+  // resumed orchestrator does not lose results a dead process already
+  // recorded -- only the in-memory bookkeeping that would otherwise re-fire
+  // integration is reconstructed; the tasks themselves, and their
+  // `resultCommit`/`evidence`, already live in state.
+  readonly #submissions = new Map<TaskId, ResultSubmission>();
+  #integrating = false;
+
   // Stall watchdog bookkeeping. `#lastEventAt` and `#stalledSet` are kept
   // in-memory only and rebuilt from `#live` as sessions launch and close --
   // unlike everything reached through `#update`, they are not part of
@@ -95,6 +107,17 @@ export class Orchestrator {
     this.#stallPollMs = opts.stallPollMs ?? 1000;
     this.events.setMaxListeners(0);
     this.#startStallWatch();
+
+    for (const task of Object.values(this.#state.get().tasks)) {
+      if (task.state === 'review' && task.resultCommit !== undefined) {
+        this.#submissions.set(task.id, {
+          taskId: task.id,
+          baseCommit: task.baseCommit ?? '',
+          resultCommit: task.resultCommit,
+          evidence: task.evidence ?? '',
+        });
+      }
+    }
   }
 
   /**
@@ -175,8 +198,13 @@ export class Orchestrator {
     const set = await latestCheckpointSet(this.#runDir);
     if (!set) {
       // A run that died before its first pause. Nothing to restore, so launch
-      // clean rather than refusing: the tasks and worktrees still stand.
+      // clean rather than refusing: the tasks and worktrees still stand. This
+      // is also the likely shape of a crash after every task had already
+      // reported a result but before integration ran: nothing about
+      // submitting a result pauses the run, so there may be no checkpoint at
+      // all even though integration is now overdue.
       await this.#launchAll(platform);
+      void this.#maybeIntegrate();
       return undefined;
     }
 
@@ -200,6 +228,11 @@ export class Orchestrator {
     });
     await this.#launchAll(platform, checkpoints);
     this.events.emit('resumed', { index: set.index, platform });
+    // A process that died between "every task reported a result" and
+    // "integration finished" must not leave the run stuck forever: retry the
+    // check now that sessions are back up. A no-op when integration already
+    // ran, or when tasks are still outstanding.
+    void this.#maybeIntegrate();
     return set.index;
   }
 
@@ -552,6 +585,7 @@ export class Orchestrator {
       contextFiles,
       roleInstructions,
       checkpoint,
+      platform,
     });
 
     const opts: StartSessionOptions = {
@@ -590,6 +624,18 @@ export class Orchestrator {
         platformSessionId: session.platformSessionId,
         status: 'starting',
       };
+      // A task's coordinator starting up is the "ready -> running" edge.
+      // Guarded to `ready` only: a relaunch after a checkpoint (switch or
+      // resume) reuses the same session id for a task already `running`,
+      // and must never regress a task that has since reached `review`,
+      // `done`, or `failed`.
+      if (role === 'coordinator') {
+        for (const task of Object.values(draft.tasks)) {
+          if (task.coordinator === sessionId && task.state === 'ready') {
+            task.state = 'running';
+          }
+        }
+      }
     });
 
     void this.#pump(sessionId, platform, session);
@@ -653,6 +699,14 @@ export class Orchestrator {
             resolver(parseCheckpoint(block));
           }
         }
+
+        // Unlike a checkpoint, a result is never requested: a coordinator
+        // sends one on its own schedule, so this is checked on every piece
+        // of text regardless of `#pending`.
+        const resultBlock = extractResult(event.text);
+        if (resultBlock !== undefined) {
+          await this.#handleResult(sessionId, resultBlock);
+        }
         break;
       }
 
@@ -693,5 +747,212 @@ export class Orchestrator {
         break;
       }
     }
+  }
+
+  /**
+   * A coordinator's own report never marks a task done -- that is the whole
+   * point of `acceptResult`/`integrate` running independently in
+   * `#runIntegration`. This only turns a session's fenced reply into a
+   * `ResultSubmission` CAPO trusts the shape of, and moves the task to
+   * `review` so a person (and `#maybeIntegrate`) can see it is waiting on
+   * integration, not still in flight.
+   *
+   * `taskId` is resolved from CAPO's own task table whenever that is
+   * unambiguous (a coordinator owning exactly one task), the same way
+   * `#stampCheckpoint` prefers what CAPO already knows over what a session
+   * claims. Only when a coordinator owns several tasks -- genuinely
+   * ambiguous, see `#cwdFor` -- is the session's own claim used, and even
+   * then only to pick among tasks it actually owns.
+   */
+  async #handleResult(sessionId: SessionId, block: string): Promise<void> {
+    let raw;
+    try {
+      raw = parseResult(block);
+    } catch (err) {
+      this.#log(`[${sessionId}] could not parse result: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const state = this.#state.get();
+    const owned = Object.values(state.tasks).filter((t) => t.coordinator === sessionId);
+    const task = owned.length === 1 ? owned[0] : owned.find((t) => t.id === raw.taskId);
+
+    if (!task) {
+      this.#log(
+        `[${sessionId}] result names task "${raw.taskId}", which it does not own; ignored`,
+      );
+      return;
+    }
+    if (task.state === 'done' || task.state === 'failed') {
+      this.#log(`[${sessionId}] result for task "${task.id}" ignored: already ${task.state}`);
+      return;
+    }
+
+    const submission: ResultSubmission = {
+      taskId: task.id,
+      baseCommit: task.baseCommit ?? state.baseCommit,
+      resultCommit: raw.resultCommit,
+      evidence: raw.evidence,
+    };
+    this.#submissions.set(task.id, submission);
+
+    await this.#update((draft) => {
+      const t = draft.tasks[task.id];
+      if (t) {
+        t.state = 'review';
+        t.resultCommit = submission.resultCommit;
+        t.evidence = submission.evidence;
+      }
+    });
+
+    this.#log(`[${sessionId}] result received for task "${task.id}" (${submission.resultCommit})`);
+    this.events.emit('result-received', {
+      taskId: task.id,
+      sessionId,
+      resultCommit: submission.resultCommit,
+    });
+
+    await this.#maybeIntegrate();
+  }
+
+  /**
+   * Fires integration once every currently-known task has either a
+   * submission in hand or has already been resolved by a previous
+   * integration attempt. Guarded against re-entry (`#integrating`) and
+   * against a switch in flight: a result arriving mid-checkpoint should wait
+   * for the switch to land rather than race it.
+   */
+  async #maybeIntegrate(): Promise<void> {
+    if (this.#integrating || this.#switching) return;
+
+    const state = this.#state.get();
+    if (state.status === 'done' || state.status === 'failed') return;
+
+    const tasks = Object.values(state.tasks);
+    if (tasks.length === 0) return;
+    const allReported = tasks.every(
+      (t) => this.#submissions.has(t.id) || t.state === 'done' || t.state === 'failed',
+    );
+    if (!allReported) return;
+
+    this.#integrating = true;
+    try {
+      await this.#runIntegration(state, tasks);
+    } finally {
+      this.#integrating = false;
+    }
+  }
+
+  /**
+   * The root integrates: `acceptResult` re-checks each submission
+   * independently of the coordinator's own claim (out-of-scope diffs,
+   * including renames, are rejected outright and never reach `integrate`),
+   * then `integrate` merges what is left, one task at a time, and runs
+   * `config.checkCommand` once over the combined tree.
+   *
+   * The run finishes here: every task's outcome is written back, the run's
+   * own status becomes `done` (a clean merge and a passing combined check)
+   * or `failed` (a rejection, a conflict, or a failing check), and every
+   * live session is closed -- there is nothing left for any of them to do.
+   */
+  async #runIntegration(state: RunState, tasks: TaskRecord[]): Promise<void> {
+    const accepted = new Map<TaskId, ResultSubmission>();
+    const rejections: { taskId: TaskId; reason: string }[] = [];
+
+    for (const task of tasks) {
+      const sub = this.#submissions.get(task.id);
+      if (!sub) continue;
+      const outcome = await acceptResult(this.#config.workspace, task, sub);
+      if (outcome.accepted) {
+        accepted.set(task.id, sub);
+      } else {
+        rejections.push({ taskId: task.id, reason: outcome.reason ?? 'result rejected' });
+      }
+    }
+
+    let report: IntegrationReport;
+    try {
+      report = await integrate({
+        repo: this.#config.workspace,
+        runDir: this.#runDir,
+        baseCommit: state.baseCommit,
+        tasks,
+        submissions: accepted,
+        checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : undefined,
+      });
+    } catch (err) {
+      this.#log(`integration failed to run: ${err instanceof Error ? err.message : String(err)}`);
+      await this.#update((draft) => {
+        draft.status = 'failed';
+      });
+      this.events.emit('integration-finished', {
+        status: 'failed',
+        merged: [],
+        conflicted: [],
+        rejections,
+        checksPassed: false,
+      });
+      return;
+    }
+
+    const mergedSet = new Set(report.merged);
+    const conflictedByTask = new Map(report.conflicted.map((c) => [c.taskId, c.files]));
+
+    const liveEntries = [...this.#live.entries()];
+
+    await this.#update((draft) => {
+      for (const task of tasks) {
+        const t = draft.tasks[task.id];
+        if (!t) continue;
+
+        const rejection = rejections.find((r) => r.taskId === task.id);
+        if (rejection) {
+          t.state = 'failed';
+          t.note = `result rejected: ${rejection.reason}`;
+          continue;
+        }
+
+        const conflictFiles = conflictedByTask.get(task.id);
+        if (conflictFiles) {
+          t.state = 'failed';
+          t.note = `merge conflict in: ${conflictFiles.join(', ') || '(unknown files)'}`;
+          continue;
+        }
+
+        if (mergedSet.has(task.id)) {
+          t.state = report.checksPassed ? 'done' : 'failed';
+          if (!report.checksPassed) t.note = 'merged, but the combined check command failed';
+        }
+      }
+
+      const anyFailed = Object.values(draft.tasks).some((t) => t.state === 'failed');
+      draft.status = anyFailed ? 'failed' : 'done';
+
+      for (const [sessionId] of liveEntries) {
+        const record = draft.sessions[sessionId];
+        if (record) record.status = 'stopped';
+      }
+    });
+
+    // The run is over: nothing left for any live session to do. Closed
+    // directly, with no checkpoint round-trip -- unlike a platform switch,
+    // there is no relaunch to hand a checkpoint to.
+    await Promise.all(liveEntries.map(([, live]) => live.session.close().catch(() => {})));
+    for (const [sessionId] of liveEntries) {
+      this.#live.delete(sessionId);
+      this.#lastEventAt.delete(sessionId);
+      this.#stalledSet.delete(sessionId);
+    }
+    this.#stopStallWatch();
+
+    const finalStatus = this.#state.get().status;
+    this.#log(`integration finished: run ${finalStatus} (merged ${report.merged.length}/${tasks.length})`);
+    this.events.emit('integration-finished', {
+      status: finalStatus,
+      merged: report.merged,
+      conflicted: report.conflicted,
+      rejections,
+      checksPassed: report.checksPassed,
+    });
   }
 }

@@ -52,11 +52,11 @@ export function renderStatusMarkdown(state: RunState): string {
   if (tasks.length === 0) {
     lines.push('_no tasks registered yet_');
   } else {
-    lines.push('| task | coordinator | state | write scope | result |');
-    lines.push('| --- | --- | --- | --- | --- |');
+    lines.push('| task | coordinator | state | write scope | result | note |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
     for (const t of tasks) {
       lines.push(
-        `| ${t.id} | ${t.coordinator} | ${t.state} | ${t.writeScope.join(', ')} | ${t.resultCommit ?? '-'} |`,
+        `| ${t.id} | ${t.coordinator} | ${t.state} | ${t.writeScope.join(', ')} | ${t.resultCommit ?? '-'} | ${t.note ?? '-'} |`,
       );
     }
   }

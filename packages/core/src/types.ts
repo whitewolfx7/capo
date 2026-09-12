@@ -67,6 +67,15 @@ export interface CapoConfig {
    * granting it is defensible here.
    */
   autonomy: AutonomyLevel;
+  /**
+   * The combined check run once, over the fully integrated tree, after every
+   * task's result has merged -- e.g. `["npm", "test"]`. Passed to `execFile`
+   * as argv, never a shell string. CAPO cannot guess how a project verifies
+   * itself, so there is no sensible non-empty default: an empty array (the
+   * default) means integration accepts a clean merge on its own, with no
+   * combined check to run.
+   */
+  checkCommand: string[];
 }
 
 export type AutonomyLevel = 'supervised' | 'autonomous';
@@ -93,6 +102,8 @@ export interface TaskRecord {
   branch?: string;
   baseCommit?: string;
   resultCommit?: string;
+  /** The test-evidence narrative from the coordinator's result submission. */
+  evidence?: string;
   note?: string;
 }
 

@@ -49,6 +49,16 @@ describe('renderStatusMarkdown', () => {
     expect(md).toContain('src/a/');
   });
 
+  it('shows why an integration failed, not just that it did', () => {
+    const md = renderStatusMarkdown(state({
+      tasks: {
+        a: { id: 'a', coordinator: 'team-a', briefPath: '/x/a.md', writeScope: ['src/a/'],
+             state: 'failed', note: 'merge conflict in: src/a/keep.ts' },
+      },
+    }));
+    expect(md).toContain('merge conflict in: src/a/keep.ts');
+  });
+
   it('reports usage limits including an unknown reset time', () => {
     const md = renderStatusMarkdown(state({
       limits: {

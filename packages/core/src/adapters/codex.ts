@@ -161,7 +161,17 @@ class CodexAdapterSession implements AdapterSession {
   /** Spawns the first turn and resolves once its session-configured event
    * has arrived and `platformSessionId` is set — not once the turn ends. */
   begin(opts: StartSessionOptions): Promise<void> {
-    const args = ['exec', '--json', '-m', opts.model, opts.prompt];
+    // `codex exec` has no --append-system-prompt: its PROMPT argument is
+    // documented as "initial instructions for the agent" and is the only
+    // input channel. So the system prompt is prepended to the first turn.
+    //
+    // This is not cosmetic. The system prompt carries the objective, the role
+    // instructions, the session's write scope, and the checkpoint protocol.
+    // An earlier version passed only `opts.prompt`, and a live run showed
+    // real Codex sessions replying "no concrete objective appears in the
+    // visible request" — and, worse, with no knowledge of the checkpoint
+    // protocol they could never have survived a platform switch.
+    const args = ['exec', '--json', '-m', opts.model, composeFirstTurn(opts)];
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       const onReady = (): void => {
@@ -510,4 +520,24 @@ function isUsageLimit(message: string): boolean {
 function usageLimitEvent(raw: string): AdapterEvent {
   const resetAt = normalizeResetAt(undefined, raw);
   return resetAt !== undefined ? { kind: 'usage-limit', resetAt, raw } : { kind: 'usage-limit', raw };
+}
+
+/**
+ * The single text blob that opens a Codex session: the system prompt, then
+ * the first user turn, separated so a reader (and the model) can tell them
+ * apart.
+ */
+export function composeFirstTurn(opts: StartSessionOptions): string {
+  const system = opts.systemPrompt.trim();
+  const first = opts.prompt.trim();
+  if (system === '') return first;
+  return [
+    system,
+    '',
+    '---',
+    '',
+    '# Your first instruction',
+    '',
+    first,
+  ].join('\n');
 }

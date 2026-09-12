@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { AdapterEvent, AdapterSession } from '../types.js';
 import { CapoError } from '../types.js';
-import { CodexAdapter } from './codex.js';
+import { CodexAdapter, composeFirstTurn } from './codex.js';
 import { eventOfKind, opts0, runAdapterConformance } from './conformance.js';
 
 const stub = fileURLToPath(new URL('./__fixtures__/codex-stub.mjs', import.meta.url));
@@ -20,7 +20,13 @@ describe('CodexAdapter argv', () => {
     const adapter = new CodexAdapter({ executable: process.execPath, extraArgs: [stub] });
     const session = (await adapter.start({ ...opts0(), model: 'gpt-5-codex' })) as DebugSession;
 
-    expect(session.debugArgv[0]).toEqual(['exec', '--json', '-m', 'gpt-5-codex', 'go']);
+    const argv = session.debugArgv[0]!;
+    expect(argv.slice(0, 4)).toEqual(['exec', '--json', '-m', 'gpt-5-codex']);
+    // The last argument is the composed first turn: system prompt (if any)
+    // then the first user instruction, because codex exec has no
+    // --append-system-prompt and PROMPT is the only input channel.
+    expect(argv).toHaveLength(5);
+    expect(argv[4]).toContain('go');
 
     await session.close();
   });
@@ -107,5 +113,48 @@ describe('CodexAdapter app-server mode', () => {
 
     await expect(adapter.start(opts0())).rejects.toThrow(CapoError);
     await expect(adapter.start(opts0())).rejects.toThrow('app-server mode is not implemented in v0.1');
+  });
+});
+
+describe('CodexAdapter system prompt delivery', () => {
+  /**
+   * `codex exec` has no --append-system-prompt, so the system prompt must ride
+   * in the PROMPT argument. An earlier version dropped it entirely. A live run
+   * showed real Codex sessions replying that no objective was visible, and
+   * they would also have had no knowledge of the checkpoint protocol, which
+   * means no session could ever have survived a platform switch.
+   */
+  it('puts the system prompt on the command line, ahead of the first turn', async () => {
+    const a = new CodexAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const s = await a.start({
+      sessionId: 'team-a', role: 'coordinator', model: 'gpt-5.6-sol',
+      cwd: process.cwd(),
+      systemPrompt: '## Objective\nShip the thing.\n\n## Your ownership\nsrc/a/',
+      prompt: 'Begin work.',
+    });
+    const argv = (s as unknown as DebugSession).debugArgv[0]!;
+    const blob = argv[argv.length - 1]!;
+    expect(blob).toContain('Ship the thing.');
+    expect(blob).toContain('src/a/');
+    expect(blob).toContain('Begin work.');
+    expect(blob.indexOf('Ship the thing.')).toBeLessThan(blob.indexOf('Begin work.'));
+    await s.close();
+  });
+
+  it('sends just the prompt when there is no system prompt', () => {
+    expect(composeFirstTurn({
+      sessionId: 'x', role: 'worker', model: 'm', cwd: '.',
+      systemPrompt: '   ', prompt: 'go',
+    })).toBe('go');
+  });
+
+  it('keeps the checkpoint protocol intact, since a switch depends on it', () => {
+    const out = composeFirstTurn({
+      sessionId: 'x', role: 'coordinator', model: 'm', cwd: '.',
+      systemPrompt: 'Checkpoint protocol: reply with a fenced block titled # Checkpoint: <id>',
+      prompt: 'go',
+    });
+    expect(out).toContain('Checkpoint protocol');
+    expect(out).toContain('# Checkpoint:');
   });
 });

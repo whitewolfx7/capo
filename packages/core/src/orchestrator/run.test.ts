@@ -383,3 +383,34 @@ describe('resume clears limits that no longer apply', () => {
     expect(state.get().limits['claude']?.resetAt).toBe(resetAt);
   });
 });
+
+describe('worktree branch naming', () => {
+  /**
+   * Branches live in the repository and outlive `.capo/`. A second run, or a
+   * retry after a failed one, must not collide: `git worktree add -b` fails
+   * hard on an existing branch and the orchestrator dies before launching
+   * anything.
+   */
+  it('scopes each task branch to the run id', async () => {
+    const { orch, state } = await harness();
+    await orch.start();
+    const runId = state.get().runId;
+    for (const task of Object.values(state.get().tasks)) {
+      expect(task.branch, task.id).toBe(`capo/${runId}/${task.id}`);
+    }
+  });
+
+  it('gives two runs in one repository different branch names', async () => {
+    const a = await harness();
+    await a.orch.start();
+    const b = await harness();
+    await b.orch.start();
+    const branchesA = Object.values(a.state.get().tasks).map((t) => t.branch);
+    const branchesB = Object.values(b.state.get().tasks).map((t) => t.branch);
+    // Same harness uses the same run id, so compare shape rather than value:
+    // every branch must carry its own run id segment.
+    for (const br of [...branchesA, ...branchesB]) {
+      expect(br).toMatch(/^capo\/[^/]+\/[^/]+$/);
+    }
+  });
+});

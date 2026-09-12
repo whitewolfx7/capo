@@ -76,3 +76,62 @@ describe('CodexAdapter against a real captured stream', () => {
     expect(events.some((e) => e.kind === 'usage-limit')).toBe(false);
   });
 });
+
+const successStream = fileURLToPath(
+  new URL('./__fixtures__/codex-real-success.jsonl', import.meta.url),
+);
+
+/**
+ * A REAL successful turn, captured from codex-cli 0.147.0 with gpt-5.6-sol.
+ * This is the path the earlier capture could not reach, and it is what pins
+ * down assistant text: `item.completed` with `item.type: "agent_message"` and
+ * the prose in `text`.
+ */
+describe('CodexAdapter against a real successful turn', () => {
+  async function drain(): Promise<AdapterEvent[]> {
+    const adapter = new CodexAdapter({
+      executable: process.execPath,
+      extraArgs: [replay, successStream],
+    });
+    const session = await adapter.start({
+      sessionId: 'team-a', role: 'coordinator', model: 'gpt-5.6-sol',
+      cwd: process.cwd(), systemPrompt: '', prompt: 'go',
+    });
+    const seen: AdapterEvent[] = [];
+    const pump = (async () => { for await (const e of session.events()) seen.push(e); })();
+    await new Promise((r) => setTimeout(r, 150));
+    await session.close();
+    await pump;
+    return seen;
+  }
+
+  it('becomes ready from the real thread id', async () => {
+    const ready = (await drain()).find((e) => e.kind === 'ready');
+    expect(ready?.kind === 'ready' && ready.platformSessionId)
+      .toBe('01a096b5-7d8d-7ba3-9e35-853f33c8f827');
+  });
+
+  it('surfaces the assistant reply as text', async () => {
+    const texts = (await drain()).filter((e) => e.kind === 'text');
+    expect(texts).toHaveLength(1);
+    expect(texts[0]!.kind === 'text' && texts[0]!.text).toBe('OK');
+  });
+
+  it('ends the turn on turn.completed', async () => {
+    const events = await drain();
+    const text = events.findIndex((e) => e.kind === 'text');
+    const end = events.findIndex((e) => e.kind === 'turn-end');
+    expect(end, 'a turn-end').toBeGreaterThan(-1);
+    expect(end, 'after the reply').toBeGreaterThan(text);
+  });
+
+  it('does not mistake the plugin warning for a failure', async () => {
+    const events = await drain();
+    expect(events.some((e) => e.kind === 'error' && !e.retryable)).toBe(false);
+    expect(events.some((e) => e.kind === 'error' && e.retryable)).toBe(true);
+  });
+
+  it('reports no usage limit for a healthy turn', async () => {
+    expect((await drain()).some((e) => e.kind === 'usage-limit')).toBe(false);
+  });
+});

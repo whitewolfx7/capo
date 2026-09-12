@@ -97,7 +97,11 @@ export class Orchestrator {
     const taskRecords: TaskRecord[] = [];
     for (const task of this.#config.tasks) {
       const worktree = join(this.#runDir, 'worktrees', task.id);
-      const branch = `capo/${task.id}`;
+      // Scoped to the run, not just the task. Branches outlive `.capo/`, so a
+      // second run in the same repository (or a retry after a failed one)
+      // would hit "a branch named 'capo/task-a' already exists" and the
+      // orchestrator would die before launching anything.
+      const branch = `capo/${this.#state.get().runId}/${task.id}`;
       await addWorktree(this.#config.workspace, worktree, branch, base);
       taskRecords.push({
         id: task.id,

@@ -58,10 +58,17 @@ export const configFileSchema = z
     // the same footing via --approve-for-me, which keeps the workspace-write
     // sandbox, rather than --dangerously-bypass-approvals-and-sandbox.
     //
-    // What makes that defensible: every task runs in its own git worktree, not
-    // the user's working tree; every task declares a write scope; and
-    // integrate/merge.ts re-checks each submitted diff against that scope,
-    // renames included, before anything is integrated.
+    // What makes that defensible: a coordinator owning one task runs in that
+    // task's own git worktree, not the user's working tree, and every task
+    // declares a write scope that integrate/merge.ts re-checks against each
+    // submitted diff, renames included.
+    //
+    // Read that precisely. A coordinator owning SEVERAL tasks still runs in
+    // the shared workspace, because a per-task worktree cannot be picked for
+    // it, and integration is not yet wired into a run at all. So today the
+    // real guard is the write scope and your own review of the diff, not
+    // filesystem isolation. Give each coordinator exactly one task if you want
+    // the isolation this argument assumes.
     //
     // Set `autonomy: supervised` for a dry run: sessions read and plan but do
     // not write.

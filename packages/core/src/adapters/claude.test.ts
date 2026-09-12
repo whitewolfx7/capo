@@ -155,11 +155,18 @@ describe('ClaudeAdapter argv', () => {
     await s.close();
   });
 
-  it('maps a non-zero exit to an exit event rather than throwing', async () => {
+  it('maps a mid-session non-zero exit to an exit event rather than throwing', async () => {
     const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub, '--crash'] });
     const s = await a.start(opts0());
     const e = await eventOfKind(s, 'exit');
     if (e.kind === 'exit') expect(e.code).not.toBe(0);
+  });
+
+  it('rejects start() when the process dies before it is ever ready', async () => {
+    // A dead session handed back as if it were live is worse than an error:
+    // the orchestrator would record it as running and wait forever.
+    const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub, '--crash-early'] });
+    await expect(a.start(opts0())).rejects.toThrow(/exited|ready/i);
   });
 
   it('close() ends stdin, waits for exit, and does not hang the happy path', async () => {

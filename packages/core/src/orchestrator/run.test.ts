@@ -537,3 +537,37 @@ describe('stall watchdog', () => {
     expect(state.get().sessions['root']?.stalled).not.toBe(true);
   });
 });
+
+describe('sessions run in their own worktree', () => {
+  /**
+   * CAPO creates a worktree per task and records it, but every session was
+   * launched with cwd set to the shared workspace, so the worktrees were dead
+   * weight. A live run proved it: two real coordinators edited the same
+   * checkout while their worktrees still held the original code. Write scopes,
+   * isolation and integration all depend on this being right.
+   */
+  it('gives a coordinator with one task that task worktree', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    for (const [id, task] of Object.entries(state.get().tasks)) {
+      const launch = claude.started.find((s) => s.sessionId === task.coordinator);
+      expect(launch, `a launch for ${task.coordinator}`).toBeDefined();
+      expect(launch!.cwd, `${id} runs in its worktree`).toBe(task.worktree);
+    }
+  });
+
+  it('keeps the root in the workspace, since it integrates', async () => {
+    const { orch, claude, config } = await harness();
+    await orch.start();
+    const root = claude.started.find((s) => s.sessionId === 'root')!;
+    expect(root.cwd).toBe(config.workspace);
+  });
+
+  it('does not put two coordinators in the same directory', async () => {
+    const { orch, claude } = await harness();
+    await orch.start();
+    const coordinators = claude.started.filter((s) => s.role === 'coordinator');
+    expect(coordinators.length).toBeGreaterThan(1);
+    expect(new Set(coordinators.map((s) => s.cwd)).size).toBe(coordinators.length);
+  });
+});

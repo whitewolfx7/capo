@@ -65,6 +65,7 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readJsonLines } from './lines.js';
 import { parseResetAt } from './reset-time.js';
+import { CapoError } from '../types.js';
 import type {
   AdapterEvent,
   AdapterSession,
@@ -129,6 +130,9 @@ class EventQueue implements AsyncIterable<AdapterEvent> {
     return { next: () => this.next() };
   }
 }
+
+/** How long to wait for a session to report itself ready before giving up. */
+const READY_TIMEOUT_MS = 120_000;
 
 const USAGE_LIMIT_RE = /usage limit reached/i;
 /**
@@ -402,13 +406,36 @@ export class ClaudeAdapter implements PlatformAdapter {
       // rejection (see send() below) is what callers observe.
     });
 
-    await readyPromise;
-
-    // The initial prompt is just the first turn: deliver it exactly like
-    // send() would once the session is up and running.
+    // The prompt goes FIRST, before waiting for ready. Claude Code does not
+    // emit `system`/`init` until it has received a first user message: with
+    // stdin open and nothing sent, it emits only SessionStart hook events and
+    // then waits. Awaiting ready before writing deadlocks both sides forever,
+    // the adapter waiting for init and the CLI waiting for input.
+    //
+    // Found by a full orchestration run against the real CLI. No stub test
+    // could catch it, because a stub emits init whether or not anyone speaks
+    // first. The stub now mirrors the real ordering.
     if (!exited) {
       child.stdin.write(userMessageLine(opts.prompt));
     }
+
+    // Bound the wait. An adapter that hangs forever is strictly worse than one
+    // that fails: a hung session looks identical to a working one from the
+    // outside, and that is exactly how this bug survived until a real run.
+    await Promise.race([
+      readyPromise,
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+          reject(
+            new CapoError(
+              `claude-code: session "${opts.sessionId}" produced no init event within ${READY_TIMEOUT_MS / 1000}s`,
+              'Check `claude doctor` and that the CLI is logged in. A SessionStart hook that never finishes can also block startup.',
+            ),
+          );
+        }, READY_TIMEOUT_MS);
+        timer.unref();
+      }),
+    ]);
 
     const session: AdapterSession = {
       sessionId,

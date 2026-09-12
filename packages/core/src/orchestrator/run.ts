@@ -496,6 +496,41 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Where a session actually runs.
+   *
+   * CAPO creates a git worktree per task and records it in state, but every
+   * session was launched with `cwd` set to the shared workspace, so the
+   * worktrees were never used. A live run made that concrete: two coordinators
+   * both edited the same checkout while their worktrees sat untouched with the
+   * original code. Isolation, write scopes and integration all rest on each
+   * coordinator working in its own tree, so none of them were real.
+   *
+   * The root stays in the workspace: it integrates, so it needs to see
+   * everything.
+   *
+   * A coordinator owning exactly one task gets that task's worktree. Owning
+   * several is genuinely ambiguous under the current per-task worktree model,
+   * so it stays in the workspace and says so, rather than silently picking one.
+   */
+  #cwdFor(role: RoleName, sessionId: SessionId): string {
+    if (role !== 'coordinator') return this.#config.workspace;
+
+    const owned = Object.values(this.#state.get().tasks).filter(
+      (t) => t.coordinator === sessionId,
+    );
+    const only = owned.length === 1 ? owned[0] : undefined;
+    if (only?.worktree !== undefined) return only.worktree;
+
+    if (owned.length > 1) {
+      this.#log(
+        `[${sessionId}] owns ${owned.length} tasks, so it runs in the shared workspace ` +
+          `rather than an isolated worktree. Give each coordinator one task for isolation.`,
+      );
+    }
+    return this.#config.workspace;
+  }
+
   async #launchOne(
     adapter: PlatformAdapter,
     platform: PlatformId,
@@ -523,7 +558,7 @@ export class Orchestrator {
       sessionId,
       role,
       model,
-      cwd: this.#config.workspace,
+      cwd: this.#cwdFor(role, sessionId),
       systemPrompt,
       prompt: checkpoint ? 'Resume your work from your checkpoint, above.' : 'Begin work toward the objective, above.',
       autonomy: this.#config.autonomy,

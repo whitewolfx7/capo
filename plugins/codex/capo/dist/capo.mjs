@@ -12380,6 +12380,7 @@ var EventQueue2 = class {
     return { next: () => this.next() };
   }
 };
+var READY_TIMEOUT_MS = 12e4;
 var USAGE_LIMIT_RE = /usage limit reached/i;
 function extractResetAt(text) {
   return parseResetAt(text);
@@ -12574,10 +12575,18 @@ var ClaudeAdapter = class {
     });
     child.stdin.on("error", () => {
     });
-    await readyPromise;
     if (!exited) {
       child.stdin.write(userMessageLine(opts.prompt));
     }
+    await Promise.race([
+      readyPromise,
+      new Promise((_, reject) => {
+        const timer = setTimeout(() => {
+          reject(new CapoError(`claude-code: session "${opts.sessionId}" produced no init event within ${READY_TIMEOUT_MS / 1e3}s`, "Check `claude doctor` and that the CLI is logged in. A SessionStart hook that never finishes can also block startup."));
+        }, READY_TIMEOUT_MS);
+        timer.unref();
+      })
+    ]);
     const session = {
       sessionId,
       get platformSessionId() {
@@ -13576,6 +13585,35 @@ var Orchestrator = class {
       await this.#launchOne(adapter, platform, coordinator.id, "coordinator", contextFiles, await roleInstructions("coordinator"), checkpoints?.get(coordinator.id));
     }
   }
+  /**
+   * Where a session actually runs.
+   *
+   * CAPO creates a git worktree per task and records it in state, but every
+   * session was launched with `cwd` set to the shared workspace, so the
+   * worktrees were never used. A live run made that concrete: two coordinators
+   * both edited the same checkout while their worktrees sat untouched with the
+   * original code. Isolation, write scopes and integration all rest on each
+   * coordinator working in its own tree, so none of them were real.
+   *
+   * The root stays in the workspace: it integrates, so it needs to see
+   * everything.
+   *
+   * A coordinator owning exactly one task gets that task's worktree. Owning
+   * several is genuinely ambiguous under the current per-task worktree model,
+   * so it stays in the workspace and says so, rather than silently picking one.
+   */
+  #cwdFor(role, sessionId) {
+    if (role !== "coordinator")
+      return this.#config.workspace;
+    const owned = Object.values(this.#state.get().tasks).filter((t) => t.coordinator === sessionId);
+    const only = owned.length === 1 ? owned[0] : void 0;
+    if (only?.worktree !== void 0)
+      return only.worktree;
+    if (owned.length > 1) {
+      this.#log(`[${sessionId}] owns ${owned.length} tasks, so it runs in the shared workspace rather than an isolated worktree. Give each coordinator one task for isolation.`);
+    }
+    return this.#config.workspace;
+  }
   async #launchOne(adapter, platform, sessionId, role, contextFiles, roleInstructions, checkpoint) {
     const model = this.#config.models[role][platform];
     if (model === void 0) {
@@ -13593,7 +13631,7 @@ var Orchestrator = class {
       sessionId,
       role,
       model,
-      cwd: this.#config.workspace,
+      cwd: this.#cwdFor(role, sessionId),
       systemPrompt,
       prompt: checkpoint ? "Resume your work from your checkpoint, above." : "Begin work toward the objective, above.",
       autonomy: this.#config.autonomy

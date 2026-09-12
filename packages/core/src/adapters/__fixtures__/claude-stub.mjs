@@ -62,9 +62,23 @@ function writeInit() {
   );
 }
 
-writeInit();
+// The real CLI emits SessionStart hook events immediately but does NOT emit
+// `system`/`init` until it has received a first user message. Mirroring that
+// ordering here is the whole point: the old stub emitted init unprompted, so
+// every test passed while a real orchestration run deadlocked, the adapter
+// waiting for init and the CLI waiting for input. Verified against
+// claude 2.1.236.
+process.stdout.write(
+  JSON.stringify({ type: 'system', subtype: 'hook_started', session_id: sessionId }) + '\n',
+);
+process.stdout.write(
+  JSON.stringify({ type: 'system', subtype: 'hook_response', session_id: sessionId }) + '\n',
+);
 
-if (argv.includes('--crash')) {
+// --crash-early: die before init ever arrives, the way a broken install or a
+// failed auth check does. start() must reject rather than hand back a dead
+// session.
+if (argv.includes('--crash-early')) {
   process.exit(1);
 }
 
@@ -91,9 +105,15 @@ rl.on('line', (line) => {
 
   turn += 1;
   // The real CLI re-sends `system`/`init` before every turn, including the
-  // first (already sent above, before stdin was even read). Reproduce that
-  // for every later turn too.
-  if (turn > 1) writeInit();
+  // The real CLI emits init only once the first user message lands, and then
+  // re-emits it before every later turn. So: always, on every turn.
+  writeInit();
+
+  // --crash: die AFTER becoming ready, i.e. mid-session. That must surface as
+  // an exit event on the stream, not as a thrown error.
+  if (argv.includes('--crash')) {
+    process.exit(1);
+  }
 
   const text = extractText(parsed) ?? '';
 

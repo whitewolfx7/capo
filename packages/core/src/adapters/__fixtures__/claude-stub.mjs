@@ -3,6 +3,18 @@
  * A stand-in for the real `claude` CLI's stream-json contract, used only by
  * `claude.test.ts`. Never talks to a network or a real account.
  *
+ * Shapes here are drawn from a real captured run (Claude Code 2.1.236, see
+ * `claude-real-stream.jsonl` and `claude-real-toolcall.jsonl`), not from the
+ * adapter's original guesses. Two things a live run corrected are baked in
+ * on purpose:
+ *
+ *   - `system`/`init` is re-emitted before every turn, not just the first.
+ *     A live run showed this actually happens; the stub reproducing it is
+ *     what makes the "only one ready event, ever" regression observable.
+ *   - Usage-limit signals are a structured `rate_limit_event` with
+ *     `rate_limit_info.status`, not prose in assistant text. The text-based
+ *     `__EMIT_LIMIT__` trigger is kept only as a fallback-path test.
+ *
  * Behavior, in order:
  *   0. If `--version` is present, prints a version line and exits 0, so
  *      `doctor()` can be tested against the same probe it uses for real.
@@ -13,9 +25,20 @@
  *   3. Unless `--crash` was passed (in which case it exits 1 right here,
  *      after the init line so the adapter has already seen `ready`), it
  *      reads newline-delimited JSON "user" messages from stdin. For each
- *      one it prints an `assistant` message followed by a `result` message.
- *      When the incoming text contains `__EMIT_LIMIT__` the assistant
- *      message uses the real usage-limit shape instead of an echo.
+ *      one but the first, it first re-prints a `system`/`init` line (the
+ *      real CLI does this before every turn). Then, depending on what the
+ *      incoming text contains:
+ *        - `__EMIT_LIMIT__`: an assistant text block using the (unconfirmed)
+ *          prose usage-limit wording.
+ *        - `__EMIT_RATE_LIMIT_REJECTED__`: a `rate_limit_event` with
+ *          `status: "rejected"`, the real structured limit signal.
+ *        - `__EMIT_RATE_LIMIT_ALLOWED__`: a `rate_limit_event` with
+ *          `status: "allowed"` (must NOT surface as a usage-limit event).
+ *        - `__EMIT_ERROR_RESULT__`: a `result` with `is_error: true`.
+ *        - `__EMIT_TOOL__`: an assistant `tool_use` block before the reply.
+ *        - anything else: an echoed assistant text block.
+ *      then a `result` message (unless the error-result trigger already
+ *      emitted one).
  */
 import { createInterface } from 'node:readline';
 
@@ -33,9 +56,13 @@ process.stdout.write(JSON.stringify(argv) + '\n');
 const sessionIdIndex = argv.indexOf('--session-id');
 const sessionId = sessionIdIndex !== -1 ? argv[sessionIdIndex + 1] : 'unknown-session';
 
-process.stdout.write(
-  JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId }) + '\n',
-);
+function writeInit() {
+  process.stdout.write(
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId }) + '\n',
+  );
+}
+
+writeInit();
 
 if (argv.includes('--crash')) {
   process.exit(1);
@@ -49,6 +76,7 @@ function extractText(message) {
 }
 
 const rl = createInterface({ input: process.stdin, terminal: false });
+let turn = 0;
 
 rl.on('line', (line) => {
   const trimmed = line.trim();
@@ -60,6 +88,12 @@ rl.on('line', (line) => {
   } catch {
     return;
   }
+
+  turn += 1;
+  // The real CLI re-sends `system`/`init` before every turn, including the
+  // first (already sent above, before stdin was even read). Reproduce that
+  // for every later turn too.
+  if (turn > 1) writeInit();
 
   const text = extractText(parsed) ?? '';
 
@@ -77,16 +111,89 @@ rl.on('line', (line) => {
         },
       }) + '\n',
     );
-  } else {
+    process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n');
+    return;
+  }
+
+  if (text.includes('__EMIT_RATE_LIMIT_REJECTED__')) {
+    process.stdout.write(
+      JSON.stringify({
+        type: 'rate_limit_event',
+        rate_limit_info: {
+          status: 'rejected',
+          resetsAt: Math.floor(Date.now() / 1000) + 3600,
+          rateLimitType: 'five_hour',
+        },
+        session_id: sessionId,
+      }) + '\n',
+    );
+    process.stdout.write(
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'rejected' }] },
+      }) + '\n',
+    );
+    process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n');
+    return;
+  }
+
+  if (text.includes('__EMIT_RATE_LIMIT_ALLOWED__')) {
+    process.stdout.write(
+      JSON.stringify({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed', resetsAt: 1789263000, rateLimitType: 'five_hour' },
+        session_id: sessionId,
+      }) + '\n',
+    );
     process.stdout.write(
       JSON.stringify({
         type: 'assistant',
         message: { content: [{ type: 'text', text: `echo: ${text}` }] },
       }) + '\n',
     );
+    process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n');
+    return;
   }
 
-  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success' }) + '\n');
+  if (text.includes('__EMIT_ERROR_RESULT__')) {
+    process.stdout.write(
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'about to fail' }] },
+      }) + '\n',
+    );
+    process.stdout.write(
+      JSON.stringify({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        api_error_status: 500,
+        result: 'claude-code: the model refused the request',
+      }) + '\n',
+    );
+    return;
+  }
+
+  if (text.includes('__EMIT_TOOL__')) {
+    process.stdout.write(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'toolu_stub1', name: 'Bash', input: { command: 'echo hi' } }],
+        },
+      }) + '\n',
+    );
+    process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n');
+    return;
+  }
+
+  process.stdout.write(
+    JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: `echo: ${text}` }] },
+    }) + '\n',
+  );
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n');
 });
 
 rl.on('close', () => {

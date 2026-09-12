@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ClaudeAdapter } from './claude.js';
 import { eventOfKind, firstEvent, opts0, runAdapterConformance } from './conformance.js';
+import type { AdapterEvent } from '../types.js';
 
 const stub = fileURLToPath(new URL('./__fixtures__/claude-stub.mjs', import.meta.url));
 
@@ -75,6 +76,82 @@ describe('ClaudeAdapter argv', () => {
     if (text.kind === 'text') expect(text.text).toContain('echo: hello there');
     const turnEnd = await eventOfKind(s, 'turn-end');
     expect(turnEnd.kind).toBe('turn-end');
+    await s.close();
+  });
+
+  it('emits ready only once, even though the CLI re-sends system/init before every turn', async () => {
+    // A live run against the real CLI showed `system`/`init` is re-emitted
+    // before every turn, not just the first. Left unguarded, that would put
+    // a second `ready` event on the queue mid-stream after a second turn.
+    // Single consumer throughout: `events()` returns one shared queue, and
+    // draining it from two places at once (e.g. a background pump AND
+    // `eventOfKind`) would race for the same events non-deterministically.
+    const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const s = await a.start(opts0());
+    const seen: AdapterEvent['kind'][] = [];
+    let turnEnds = 0;
+    for await (const e of s.events()) {
+      seen.push(e.kind);
+      if (e.kind === 'turn-end') {
+        turnEnds += 1;
+        if (turnEnds === 1) await s.send('second turn');
+        else if (turnEnds === 2) await s.send('third turn');
+        // A third turn to be doubly sure a later system/init still doesn't
+        // slip a ready event through.
+        else break;
+      }
+    }
+    await s.close();
+    expect(seen.filter((k) => k === 'ready')).toHaveLength(1);
+  });
+
+  it('maps a rate_limit_event with status "rejected" to a usage-limit event', async () => {
+    // The real limit signal is this structured event, not prose in
+    // assistant text (see the header note in claude.ts).
+    const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const s = await a.start({ ...opts0(), prompt: '__EMIT_RATE_LIMIT_REJECTED__' });
+    const e = await eventOfKind(s, 'usage-limit');
+    expect(e.kind).toBe('usage-limit');
+    if (e.kind === 'usage-limit') {
+      expect(e.resetAt).toBeDefined();
+      expect(Number.isNaN(new Date(e.resetAt!).getTime())).toBe(false);
+      expect(e.raw).toMatch(/rejected/);
+    }
+    await s.close();
+  });
+
+  it('does not surface a rate_limit_event with status "allowed" as a usage-limit', async () => {
+    const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const s = await a.start({ ...opts0(), prompt: '__EMIT_RATE_LIMIT_ALLOWED__' });
+    const seen: AdapterEvent['kind'][] = [];
+    for await (const e of s.events()) {
+      seen.push(e.kind);
+      if (e.kind === 'turn-end') break;
+    }
+    await s.close();
+    expect(seen).not.toContain('usage-limit');
+  });
+
+  it('maps a result with is_error true to a non-retryable error ahead of turn-end', async () => {
+    // A `result` can fail (bad input, a refusal, an API error) without any
+    // assistant text describing it; that must not be silently swallowed as
+    // a plain turn-end.
+    const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const s = await a.start({ ...opts0(), prompt: '__EMIT_ERROR_RESULT__' });
+    const seen: AdapterEvent[] = [];
+    for await (const e of s.events()) {
+      seen.push(e);
+      if (e.kind === 'turn-end') break;
+    }
+    const errIdx = seen.findIndex((e) => e.kind === 'error');
+    const endIdx = seen.findIndex((e) => e.kind === 'turn-end');
+    expect(errIdx).toBeGreaterThanOrEqual(0);
+    expect(endIdx).toBeGreaterThan(errIdx);
+    const err = seen[errIdx];
+    if (err?.kind === 'error') {
+      expect(err.retryable).toBe(false);
+      expect(err.message).toMatch(/refused/);
+    }
     await s.close();
   });
 

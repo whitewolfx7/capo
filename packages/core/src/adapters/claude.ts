@@ -2,7 +2,9 @@
  * The Claude Code platform adapter: drives the real `claude` CLI in
  * stream-json mode.
  *
- * Verified surface (Claude Code 2.1.236):
+ * Verified surface (Claude Code 2.1.236, confirmed against the real CLI on
+ * 2026-09-13 — see `__fixtures__/claude-real-stream.jsonl` and
+ * `__fixtures__/claude-real-toolcall.jsonl` for the captures):
  *   claude -p --output-format stream-json --input-format stream-json
  *          --verbose --session-id <uuid> --model <model>
  *          --append-system-prompt <text> --permission-mode acceptEdits
@@ -11,6 +13,52 @@
  * stdout. `readJsonLines` (the one piece of code this adapter shares with
  * the Codex adapter) turns the byte stream into parsed lines; everything
  * about what those lines *mean* is Claude-specific and lives here.
+ *
+ * What the live run confirmed and what it corrected, in order of surprise:
+ *
+ *  - `system`/`init` (carrying `session_id`) is NOT sent once per process.
+ *    It is sent again before EVERY turn (i.e. before the assistant's
+ *    response to every `send()`, not just the first prompt). The original
+ *    code re-pushed a `ready` event and re-resolved the (already-resolved)
+ *    ready promise on every one of these — harmless for the promise, but it
+ *    put a spurious `ready` event on the queue mid-stream, which the
+ *    conformance contract ("ready` is the very first event") never
+ *    exercised because it only starts one session per test. Fixed by only
+ *    honoring the first `system`/`init` seen; later ones are dropped.
+ *  - There is no dedicated stream event carrying the literal phrase "usage
+ *    limit reached" in `-p` mode. What actually exists is a top-level
+ *    `rate_limit_event` with a structured `rate_limit_info: { status:
+ *    "allowed" | "allowed_warning" | "rejected", resetsAt?: <unix seconds>,
+ *    rateLimitType?: string }`. The adapter originally only pattern-matched
+ *    assistant text for "usage limit reached", which a live run never once
+ *    produced — every limit signal that exists is this structured event.
+ *    `status: "rejected"` is now the primary source of `usage-limit` events;
+ *    the text pattern match is kept as a fallback in case some future
+ *    surface reports a limit only in prose. `"rejected"` itself was not
+ *    observed live (this account never hit a limit); its existence and
+ *    field shape come from the CLI's own embedded schema (extracted via
+ *    `strings` on the installed binary — see the report), not from a
+ *    triggered live event, so treat this mapping as evidence-based but not
+ *    end-to-end verified.
+ *  - A `result` line can carry `is_error: true` for a turn that failed
+ *    (bad input, a refused request, an API error) without ever emitting
+ *    assistant text describing it. The original code treated every `result`
+ *    as a plain `turn-end`, silently swallowing that failure. A failed
+ *    result is now also surfaced as a non-retryable `error` event ahead of
+ *    the `turn-end`, mirroring how the Codex adapter surfaces `turn.failed`.
+ *    This path is informed by the CLI's own schema (`is_error`/
+ *    `api_error_status` fields) rather than a captured failing run: no live
+ *    run in this investigation actually failed a turn.
+ *  - Everything else checked out: `ready` fires correctly off `session_id`;
+ *    `--append-system-prompt` text is genuinely honored (confirmed by
+ *    asking the model to repeat a codeword that only appeared there);
+ *    `send()`/a second turn on the same process works; assistant `text` and
+ *    `tool_use` blocks match the assumed shape exactly, including that each
+ *    content block arrives as its own `assistant` line rather than batched;
+ *    and — unlike the Codex CLI's approval stall — a live run under
+ *    `--permission-mode acceptEdits` in `-p` mode auto-approved both a
+ *    `Write` and a `Bash` tool call with no hang and no approval channel
+ *    needed.
  */
 import { type ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -95,6 +143,18 @@ function extractResetAt(text: string): string | undefined {
 }
 
 /**
+ * Converts a `rate_limit_info.resetsAt` value (Unix seconds, per the CLI's
+ * own schema) to an ISO timestamp. Unlike `extractResetAt` this is not
+ * parsing human prose — it is a number straight off the wire — so it never
+ * goes through `parseResetAt`'s regex matching.
+ */
+function resetsAtToIso(value: unknown): string | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const d = new Date(value * 1000);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+/**
  * Maps one parsed stdout line to zero or more adapter events. A line that
  * parses as JSON but doesn't match a known Claude Code message shape (an
  * unhandled `system` subtype, a stray banner) is dropped rather than
@@ -150,8 +210,33 @@ function mapLine(value: unknown): AdapterEvent[] {
     return events;
   }
 
+  if (obj.type === 'rate_limit_event') {
+    const info = obj.rate_limit_info as Record<string, unknown> | undefined;
+    const status = info?.status;
+    // "allowed" and "allowed_warning" are informational (the account is
+    // fine, or approaching a limit but not yet blocked); only "rejected"
+    // means this turn was actually refused for being over the limit.
+    if (status !== 'rejected') return [];
+
+    const rateLimitType = typeof info?.rateLimitType === 'string' ? info.rateLimitType : 'unknown';
+    const resetAt = resetsAtToIso(info?.resetsAt);
+    const raw = `claude-code rate limit rejected (${rateLimitType})${
+      resetAt !== undefined ? ` resets at ${resetAt}` : ''
+    }`;
+    return [resetAt !== undefined ? { kind: 'usage-limit', raw, resetAt } : { kind: 'usage-limit', raw }];
+  }
+
   if (obj.type === 'result') {
-    return [{ kind: 'turn-end' }];
+    const events: AdapterEvent[] = [];
+    if (obj.is_error === true) {
+      const message =
+        typeof obj.result === 'string' && obj.result.length > 0
+          ? obj.result
+          : 'claude-code: turn ended with an error';
+      events.push({ kind: 'error', message, retryable: false });
+    }
+    events.push({ kind: 'turn-end' });
+    return events;
   }
 
   // A recognized-but-unhandled envelope (other system subtypes, etc.): not
@@ -290,9 +375,16 @@ export class ClaudeAdapter implements PlatformAdapter {
         }
         for (const event of mapLine(line.value)) {
           if (event.kind === 'ready') {
-            platformSessionId = event.platformSessionId;
-            queue.push(event);
-            resolveReady?.();
+            // A live run showed `system`/`init` is re-sent before every
+            // turn, not just once at process start (see the header note).
+            // Only the first one means anything: honoring later ones would
+            // put a second `ready` event on the queue mid-stream, which
+            // nothing downstream expects.
+            if (platformSessionId === undefined) {
+              platformSessionId = event.platformSessionId;
+              queue.push(event);
+              resolveReady?.();
+            }
           } else {
             queue.push(event);
           }

@@ -1,0 +1,15 @@
+{
+  "name": "capo",
+  "version": "0.1.0",
+  "description": "Run one AI agent team across Claude Code and Codex. When the active platform hits its usage limit, CAPO checkpoints the whole team and continues on the other one.",
+  "author": {
+    "name": "CAPO contributors"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "orchestration",
+    "multi-agent",
+    "usage-limit",
+    "codex"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "capo",
+  "interface": {
+    "displayName": "CAPO"
+  },
+  "plugins": [
+    {
+      "name": "capo",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex/capo"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "NONE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

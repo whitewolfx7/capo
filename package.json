@@ -1,9 +1,14 @@
 {
   "name": "capo-monorepo",
   "private": true,
+  "version": "0.1.0",
   "type": "module",
-  "engines": { "node": ">=20.0.0" },
-  "workspaces": ["packages/*"],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "tsc --build",
     "test": "vitest run",

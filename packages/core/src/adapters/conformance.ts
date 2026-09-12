@@ -99,6 +99,27 @@ export function runAdapterConformance(
         expect(e.kind).toBe('usage-limit');
         await s.close();
       });
+
+      /**
+       * `resetAt` is contractually an ISO timestamp, and the orchestrator
+       * decides whether a platform is still capped by comparing it to now. A
+       * human string like "3pm (UTC)" parses to an Invalid Date, every
+       * comparison against it is false, and a capped platform looks available
+       * again: CAPO switches back into it, gets limited, and flaps. An adapter
+       * that cannot produce a real timestamp must omit the field, which the
+       * orchestrator reads as "capped until told otherwise" and waits.
+       */
+      it('reports resetAt as a usable timestamp, or not at all', async () => {
+        const s = await (await make()).start({ ...opts0(), prompt: '__EMIT_LIMIT__' });
+        const e = await eventOfKind(s, 'usage-limit');
+        if (e.kind === 'usage-limit' && e.resetAt !== undefined) {
+          expect(
+            Number.isNaN(new Date(e.resetAt).getTime()),
+            `resetAt ${JSON.stringify(e.resetAt)} must parse as a date`,
+          ).toBe(false);
+        }
+        await s.close();
+      });
     }
   });
 }

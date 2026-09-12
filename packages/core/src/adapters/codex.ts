@@ -22,6 +22,7 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { readJsonLines } from './lines.js';
+import { parseResetAt } from './reset-time.js';
 import { CapoError } from '../types.js';
 import type {
   AdapterEvent,
@@ -352,7 +353,13 @@ class CodexAdapterSession implements AdapterSession {
 
       case 'usage_limit_reached': {
         const raw = typeof record.message === 'string' ? record.message : 'codex usage limit reached';
-        const resetAt = typeof record.reset_at === 'string' ? record.reset_at : undefined;
+        // Never forward reset_at unvalidated. `resetAt` is contractually an
+        // ISO timestamp the orchestrator compares against now; a human string
+        // there parses to Invalid Date, makes a capped platform look
+        // available, and flaps the run between platforms. Codex's exact wire
+        // shape here is unverified, so accept an ISO value, try to parse a
+        // human one, and otherwise report no reset time at all.
+        const resetAt = normalizeResetAt(record.reset_at, raw);
         return resetAt !== undefined ? [{ kind: 'usage-limit', resetAt, raw }] : [{ kind: 'usage-limit', raw }];
       }
 
@@ -411,4 +418,23 @@ export class CodexAdapter implements PlatformAdapter {
     await session.begin(opts);
     return session;
   }
+}
+
+/**
+ * Coerces a platform-supplied reset time into an ISO timestamp, or nothing.
+ *
+ * Accepts an already-ISO value, falls back to parsing human wording out of
+ * either the field or the surrounding message, and returns undefined when
+ * neither is confident. Undefined is the safe answer: the orchestrator treats
+ * a limit with no reset time as capped until told otherwise, so it waits
+ * instead of switching back into a platform that is still limited.
+ */
+function normalizeResetAt(field: unknown, message: string): string | undefined {
+  if (typeof field === 'string' && field.trim() !== '') {
+    const direct = new Date(field);
+    if (!Number.isNaN(direct.getTime())) return direct.toISOString();
+    const parsed = parseResetAt(field);
+    if (parsed !== undefined) return parsed;
+  }
+  return parseResetAt(message);
 }

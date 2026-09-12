@@ -16,6 +16,7 @@ import { type ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { readJsonLines } from './lines.js';
+import { parseResetAt } from './reset-time.js';
 import type {
   AdapterEvent,
   AdapterSession,
@@ -81,12 +82,16 @@ class EventQueue implements AsyncIterable<AdapterEvent> {
 }
 
 const USAGE_LIMIT_RE = /usage limit reached/i;
-const RESET_AT_RE = /reset at ([^.]+?)\.?\s*$/i;
-
-/** Pulls a human-readable reset time out of a usage-limit message, if present. */
+/**
+ * Pulls a reset time out of a usage-limit message as an ISO timestamp.
+ *
+ * Returns undefined rather than a human string like "3pm (UTC)": `resetAt` is
+ * contractually an ISO timestamp that the orchestrator compares against now,
+ * and an unparseable value there would make a capped platform look available.
+ * The original wording survives in the event's `raw`.
+ */
 function extractResetAt(text: string): string | undefined {
-  const match = RESET_AT_RE.exec(text);
-  return match?.[1]?.trim();
+  return parseResetAt(text);
 }
 
 /**

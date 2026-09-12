@@ -50,7 +50,13 @@ describe('ClaudeAdapter argv', () => {
     expect(e.kind).toBe('usage-limit');
     if (e.kind === 'usage-limit') {
       expect(e.raw).toMatch(/usage limit reached/i);
-      expect(e.resetAt).toBe('3pm (UTC)');
+      // resetAt is contractually an ISO timestamp the orchestrator compares
+      // against now, so assert it is genuinely usable rather than pinning the
+      // platform's human wording (which lives in `raw`).
+      expect(e.resetAt).toBeDefined();
+      expect(Number.isNaN(new Date(e.resetAt!).getTime())).toBe(false);
+      expect(new Date(e.resetAt!).getUTCHours()).toBe(15);
+      expect(e.raw).toMatch(/3pm/);
     }
     await s.close();
   });

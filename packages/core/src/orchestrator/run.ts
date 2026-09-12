@@ -23,7 +23,7 @@ import type {
   TaskRecord,
 } from '../types.js';
 import type { StateStore } from '../state/store.js';
-import { writeCheckpointSet } from '../checkpoint/store.js';
+import { latestCheckpointSet, writeCheckpointSet } from '../checkpoint/store.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
 import { headCommit, addWorktree } from '../git/repo.js';
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
@@ -98,6 +98,58 @@ export class Orchestrator {
     });
 
     await this.#launchAll(this.#config.startOn);
+  }
+
+  /**
+   * Continues a run whose orchestrator process is gone: after a crash, a
+   * closed laptop, or a wait for both platforms to reset.
+   *
+   * This is the difference between CAPO working and CAPO losing your work.
+   * Checkpoints are written to disk on every pause, but nothing read them
+   * back: a relaunch with no checkpoint would start every session with no
+   * memory of what it had done, while the file describing exactly that sat
+   * unused next to it. So resume loads the latest checkpoint set and hands
+   * each session its own.
+   *
+   * Unlike `start()` this does NOT create worktrees. They already exist from
+   * the original launch, and `git worktree add` over an existing path fails.
+   *
+   * Returns the checkpoint set index it resumed from, or undefined when the
+   * run had never paused and there was nothing to resume from.
+   */
+  async resume(): Promise<number | undefined> {
+    const state = this.#state.get();
+    const platform = state.activePlatform;
+
+    const set = await latestCheckpointSet(this.#runDir);
+    if (!set) {
+      // A run that died before its first pause. Nothing to restore, so launch
+      // clean rather than refusing: the tasks and worktrees still stand.
+      await this.#launchAll(platform);
+      return undefined;
+    }
+
+    const checkpoints = new Map<SessionId, Checkpoint>();
+    for (const checkpoint of set.checkpoints) {
+      checkpoints.set(checkpoint.sessionId, checkpoint);
+    }
+
+    await this.#state.update((draft) => {
+      draft.status = 'running';
+      // Drop limit records that are no longer in the future, including ones
+      // whose reset time the platform never told us. Those are treated as
+      // capped indefinitely, which is the right default for automatic
+      // scheduling but would otherwise make a run unresumable forever. A
+      // person running `capo resume` is asserting the platform is usable now.
+      for (const [id, limit] of Object.entries(draft.limits)) {
+        const stillCapped =
+          limit.resetAt !== undefined && new Date(limit.resetAt).getTime() > Date.now();
+        if (!stillCapped) delete draft.limits[id];
+      }
+    });
+    await this.#launchAll(platform, checkpoints);
+    this.events.emit('resumed', { index: set.index, platform });
+    return set.index;
   }
 
   /**

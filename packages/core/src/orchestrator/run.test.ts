@@ -102,13 +102,16 @@ async function harness(): Promise<{
   state: StateStore;
   /** The run directory (`latestCheckpointSet`, etc. take this, not the workspace). */
   dir: string;
+  config: Awaited<ReturnType<typeof loadConfig>>;
+  adapters: Map<string, FakeAdapter>;
 }> {
   const workspace = await mkdtemp(join(tmpdir(), 'capo-orch-'));
   dirs.push(workspace);
 
   await git(workspace, ['init', '-b', 'main']);
   await writeFile(join(workspace, 'README.md'), '# demo\n');
-  await commitAll(workspace, 'initial commit');
+  // Identity passed explicitly so the suite passes on a clean machine and CI.
+  await commitAll(workspace, 'initial commit', { name: 't', email: 't@t' });
 
   await mkdir(join(workspace, 'context'), { recursive: true });
   await mkdir(join(workspace, 'roles'), { recursive: true });
@@ -154,7 +157,7 @@ async function harness(): Promise<{
 
   const orch = new Orchestrator({ config, runDir: runDirPath, state, adapters, log: () => {} });
 
-  return { orch, claude, codex, state, dir: runDirPath };
+  return { orch, claude, codex, state, dir: runDirPath, config, adapters };
 }
 
 beforeEach(() => {
@@ -258,5 +261,116 @@ describe('Orchestrator', () => {
     expect((await latestCheckpointSet(dir))!.reason).toBe('stop');
     expect(Object.values(state.get().sessions).every((s) => s.status === 'stopped')).toBe(true);
     expect(claude.closed.sort()).toEqual(['root', 'team-a', 'team-b']);
+  });
+});
+
+describe('Orchestrator.resume', () => {
+  /**
+   * The scenario CAPO exists for, minus the part where a human is watching:
+   * the run hit a limit, checkpointed, switched, and then its process died
+   * (a closed laptop, a reboot, or a wait for both platforms to reset). The
+   * checkpoints are on disk. A resume that ignores them throws away exactly
+   * the work the checkpoints were written to save.
+   */
+  it('hands each relaunched session its own checkpoint from disk', async () => {
+    const { orch, claude, state, dir, config, adapters } = await harness();
+    await orch.start();
+    claude.emit('root', { kind: 'usage-limit', raw: 'limit' });
+    await once(orch.events, 'switched');
+
+    const set = await latestCheckpointSet(dir);
+    expect(set?.checkpoints).toHaveLength(3);
+
+    // A brand new Orchestrator over the same run directory: no in-memory
+    // state carried over, exactly like a fresh process.
+    const revived = new Orchestrator({
+      config, runDir: dir, state, adapters, log: () => {},
+    });
+    const codex = adapters.get('codex')!;
+    const before = codex.started.length;
+
+    const index = await revived.resume();
+    expect(index).toBe(set!.index);
+
+    const relaunched = codex.started.slice(before);
+    expect(relaunched.map((s) => s.sessionId).sort()).toEqual(['root', 'team-a', 'team-b']);
+
+    for (const launch of relaunched) {
+      expect(launch.systemPrompt, `${launch.sessionId} got its own checkpoint`)
+        .toContain(`# Checkpoint: ${launch.sessionId}`);
+      for (const other of ['root', 'team-a', 'team-b'].filter((id) => id !== launch.sessionId)) {
+        expect(launch.systemPrompt, `${launch.sessionId} did not get ${other}'s`)
+          .not.toContain(`# Checkpoint: ${other}`);
+      }
+    }
+  });
+
+  it('resumes on the platform the run was left on, not the one it started on', async () => {
+    const { orch, claude, state, dir, config, adapters } = await harness();
+    await orch.start();
+    claude.emit('root', { kind: 'usage-limit', raw: 'limit' });
+    await once(orch.events, 'switched');
+    expect(state.get().activePlatform).toBe('codex');
+
+    const revived = new Orchestrator({ config, runDir: dir, state, adapters, log: () => {} });
+    const claudeBefore = adapters.get('claude')!.started.length;
+    const codexBefore = adapters.get('codex')!.started.length;
+
+    await revived.resume();
+
+    expect(adapters.get('codex')!.started.length).toBe(codexBefore + 3);
+    expect(adapters.get('claude')!.started.length).toBe(claudeBefore);
+  });
+
+  it('launches clean when the run died before it ever paused', async () => {
+    const { state, dir, config, adapters } = await harness();
+    // No start(), no pause: nothing on disk to resume from.
+    const revived = new Orchestrator({ config, runDir: dir, state, adapters, log: () => {} });
+
+    await expect(revived.resume()).resolves.toBeUndefined();
+    const started = adapters.get('claude')!.started;
+    expect(started.map((s) => s.sessionId).sort()).toEqual(['root', 'team-a', 'team-b']);
+    for (const launch of started) {
+      // The checkpoint REQUEST instructions legitimately contain the template
+      // line `# Checkpoint: <your own session id>`, so assert against the
+      // filled-in form: no session may arrive carrying a real checkpoint.
+      expect(launch.systemPrompt).not.toContain(`# Checkpoint: ${launch.sessionId}`);
+      expect(launch.systemPrompt).not.toContain('checkpoint from the previous platform');
+    }
+  });
+});
+
+describe('resume clears limits that no longer apply', () => {
+  it('drops a limit with no known reset time so the run is not stuck forever', async () => {
+    const { orch, claude, codex, state, dir, config, adapters } = await harness();
+    await orch.start();
+    // Neither platform told us when it resets: both are capped indefinitely,
+    // which is correct for automatic scheduling and fatal for a manual resume
+    // unless the records are cleared.
+    claude.emit('root', { kind: 'usage-limit', raw: 'no reset time' });
+    await once(orch.events, 'switched');
+    codex.emit('root', { kind: 'usage-limit', raw: 'no reset time' });
+    await once(orch.events, 'waiting');
+    expect(state.get().status).toBe('waiting');
+    expect(Object.keys(state.get().limits).sort()).toEqual(['claude', 'codex']);
+
+    const revived = new Orchestrator({ config, runDir: dir, state, adapters, log: () => {} });
+    await revived.resume();
+
+    expect(state.get().limits).toEqual({});
+    expect(state.get().status).toBe('running');
+  });
+
+  it('keeps a limit whose reset time is still in the future', async () => {
+    const { orch, claude, state, dir, config, adapters } = await harness();
+    await orch.start();
+    const resetAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    claude.emit('root', { kind: 'usage-limit', resetAt, raw: 'limited' });
+    await once(orch.events, 'switched');
+
+    const revived = new Orchestrator({ config, runDir: dir, state, adapters, log: () => {} });
+    await revived.resume();
+
+    expect(state.get().limits['claude']?.resetAt).toBe(resetAt);
   });
 });

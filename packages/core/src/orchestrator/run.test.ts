@@ -9,7 +9,7 @@ import { latestCheckpointSet } from '../checkpoint/store.js';
 import { git, commitAll } from '../git/repo.js';
 import { FakeAdapter } from '../adapters/fake.js';
 import { renderCheckpoint } from '../checkpoint/render.js';
-import type { AdapterSession, Checkpoint, StartSessionOptions } from '../types.js';
+import type { AdapterEvent, AdapterSession, Checkpoint, StartSessionOptions } from '../types.js';
 import { Orchestrator } from './run.js';
 import { CHECKPOINT_REQUEST, MAX_RESULT_NUDGES } from './prompt.js';
 
@@ -621,6 +621,60 @@ describe('checkpoints that survive a real limit', () => {
 
     const set = await latestCheckpointSet(dir);
     expect(set!.checkpoints.every((c) => c.objective.includes('synthesized'))).toBe(true);
+  });
+
+  /**
+   * A session's queue can still hold buffered events after `close()`. This
+   * stands in for a real usage-limit that was already in flight on the old
+   * platform when a switch closed that session: `events()` keeps yielding
+   * the ordinary stream and then, 200ms after it ends -- comfortably after
+   * the switch this test triggers has completed -- one extra stale
+   * `usage-limit`, as if the old platform's process reported it late.
+   */
+  class LateLimitFakeAdapter extends FakeAdapter {
+    override async start(opts: StartSessionOptions): Promise<AdapterSession> {
+      const inner = await super.start(opts);
+      const late = { kind: 'usage-limit', raw: 'stale', resetAt: future() } as const;
+      return {
+        ...inner,
+        get platformSessionId() {
+          return inner.platformSessionId;
+        },
+        events(): AsyncIterable<AdapterEvent> {
+          const src = inner.events()[Symbol.asyncIterator]();
+          let sentLate = false;
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                async next() {
+                  const r = await src.next();
+                  if (!r.done || sentLate) return r;
+                  sentLate = true;
+                  await new Promise((res) => setTimeout(res, 200));
+                  return { value: late, done: false };
+                },
+              };
+            },
+          };
+        },
+      };
+    }
+  }
+
+  it('ignores a usage-limit that a closed session delivers after the switch has completed', async () => {
+    const { orch, claude, state } = await harness((id) =>
+      id === 'claude' ? new LateLimitFakeAdapter(id) : new ArmedFakeAdapter(id),
+    );
+    await orch.start();
+
+    claude.emit('team-a', { kind: 'usage-limit', raw: 'real', resetAt: future() });
+    await withDeadline(once(orch.events, 'switched'), 'switched');
+    await new Promise((r) => setTimeout(r, 500));
+
+    const s = state.get();
+    expect(s.activePlatform).toBe('codex');
+    expect(s.status).toBe('running');
+    expect(s.pauseCount).toBe(1);
   });
 
   it('augments a coordinator checkpoint with commits and dirty files from its worktree', async () => {

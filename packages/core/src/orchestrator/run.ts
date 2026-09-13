@@ -724,6 +724,15 @@ export class Orchestrator {
   async #pump(sessionId: SessionId, platform: PlatformId, session: AdapterSession): Promise<void> {
     try {
       for await (const event of session.events()) {
+        if (this.#live.get(sessionId)?.session !== session) {
+          // A closed session draining its buffer. Keep it in the transcript for
+          // the record, but nothing it says can move the run any more.
+          if (this.#config.transcripts) {
+            const line = renderEvent(event);
+            if (line !== undefined) void appendTranscript(this.#runDir, sessionId, line);
+          }
+          continue;
+        }
         await this.#onEvent(sessionId, platform, event);
       }
     } catch (err) {
@@ -854,6 +863,10 @@ export class Orchestrator {
       }
 
       case 'usage-limit': {
+        if (platform !== this.#state.get().activePlatform) {
+          this.#log(`[${sessionId}] usage-limit from ${platform}, which is no longer active; ignored`);
+          break;
+        }
         await this.#update((draft) => {
           draft.limits[platform] = {
             detectedAt: new Date().toISOString(),

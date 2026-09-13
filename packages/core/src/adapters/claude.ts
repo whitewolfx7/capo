@@ -170,6 +170,15 @@ function resetsAtToIso(value: unknown): string | undefined {
 }
 
 /**
+ * "…usage limit reached|1757800000": the CLI's historical -p result text
+ * carries the reset as unix seconds after a pipe.
+ */
+function epochSuffixToIso(text: string): string | undefined {
+  const m = /\|(\d{9,11})\b/.exec(text);
+  return m ? resetsAtToIso(Number(m[1])) : undefined;
+}
+
+/**
  * Maps one parsed stdout line to zero or more adapter events. A line that
  * parses as JSON but doesn't match a known Claude Code message shape (an
  * unhandled `system` subtype, a stray banner) is dropped rather than
@@ -243,12 +252,19 @@ function mapLine(value: unknown): AdapterEvent[] {
 
   if (obj.type === 'result') {
     const events: AdapterEvent[] = [];
-    if (obj.is_error === true) {
-      const message =
-        typeof obj.result === 'string' && obj.result.length > 0
-          ? obj.result
-          : 'claude-code: turn ended with an error';
-      events.push({ kind: 'error', message, retryable: false });
+    const text = typeof obj.result === 'string' ? obj.result : '';
+    if (obj.is_error === true && USAGE_LIMIT_RE.test(text)) {
+      // The CLI's historical -p usage-limit phrasing can also arrive on an
+      // is_error result line rather than as assistant text or a structured
+      // rate_limit_event (see the header note on `rate_limit_event` above).
+      const resetAt = epochSuffixToIso(text) ?? extractResetAt(text);
+      events.push(resetAt !== undefined ? { kind: 'usage-limit', raw: text, resetAt } : { kind: 'usage-limit', raw: text });
+    } else if (obj.is_error === true) {
+      events.push({
+        kind: 'error',
+        message: text.length > 0 ? text : 'claude-code: turn ended with an error',
+        retryable: false,
+      });
     }
     events.push({ kind: 'turn-end' });
     return events;

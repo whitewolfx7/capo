@@ -34,6 +34,9 @@
  *          `status: "rejected"`, the real structured limit signal.
  *        - `__EMIT_RATE_LIMIT_ALLOWED__`: a `rate_limit_event` with
  *          `status: "allowed"` (must NOT surface as a usage-limit event).
+ *        - `__EMIT_USAGE_LIMIT_RESULT__`: an is_error `result` carrying the
+ *          historical -p usage-limit phrase and `|<unix-seconds>` reset
+ *          suffix, with no accompanying assistant text.
  *        - `__EMIT_ERROR_RESULT__`: a `result` with `is_error: true`.
  *        - `__EMIT_TOOL__`: an assistant `tool_use` block before the reply.
  *        - anything else: an echoed assistant text block.
@@ -172,6 +175,20 @@ rl.on('line', (line) => {
       }) + '\n',
     );
     process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false }) + '\n');
+    return;
+  }
+
+  if (text.includes('__EMIT_USAGE_LIMIT_RESULT__')) {
+    // The CLI's historical -p result text carries the reset as unix seconds
+    // after a pipe, on an is_error result line with no accompanying
+    // assistant text.
+    process.stdout.write(
+      JSON.stringify({
+        type: 'result',
+        is_error: true,
+        result: 'Claude AI usage limit reached|1757800000',
+      }) + '\n',
+    );
     return;
   }
 

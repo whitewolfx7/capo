@@ -93,6 +93,16 @@ export class StateStore {
     return run;
   }
 
+  /**
+   * Resolves once every update queued so far has been written to disk.
+   * Teardown awaits this before clearing the pid file: without it, a
+   * process that exits right after its last `update()` call races its own
+   * write, leaving a `state.json.<pid>.<n>.tmp` behind forever.
+   */
+  async flush(): Promise<void> {
+    await this.#queue;
+  }
+
   async #write(state: RunState): Promise<void> {
     const target = join(this.dir, STATE_FILE);
     const tmp = join(this.dir, `${STATE_FILE}.${process.pid}.${tmpCounter++}.tmp`);

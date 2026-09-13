@@ -156,6 +156,27 @@ describe('ClaudeAdapter argv', () => {
     await s.close();
   });
 
+  it('maps an is_error result carrying the usage-limit phrase to usage-limit with the epoch reset time', async () => {
+    // The CLI's historical -p result text: "Claude AI usage limit
+    // reached|<unix-seconds>", carried on an is_error result line rather
+    // than in assistant text or a rate_limit_event.
+    const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const s = await a.start({ ...opts0(), prompt: '__EMIT_USAGE_LIMIT_RESULT__' });
+    const events: AdapterEvent[] = [];
+    for await (const e of s.events()) {
+      events.push(e);
+      if (e.kind === 'turn-end') break;
+    }
+    expect(events).toContainEqual({
+      kind: 'usage-limit',
+      raw: 'Claude AI usage limit reached|1757800000',
+      resetAt: '2025-09-13T21:46:40.000Z',
+    });
+    expect(events.some((e) => e.kind === 'error')).toBe(false);
+    expect(events.at(-1)).toEqual({ kind: 'turn-end' });
+    await s.close();
+  });
+
   it('maps a mid-session non-zero exit to an exit event rather than throwing', async () => {
     const a = new ClaudeAdapter({ executable: process.execPath, extraArgs: [stub, '--crash'] });
     const s = await a.start(opts0());

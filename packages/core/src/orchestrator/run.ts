@@ -294,6 +294,16 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Resolves once every state write queued so far has landed on disk. Exit
+   * teardown (`blockUntilStopped`) awaits this before clearing the pid file,
+   * so a process that exits right after its last state update doesn't race
+   * its own write and leave a `state.json.<pid>.<n>.tmp` behind.
+   */
+  async flush(): Promise<void> {
+    await this.#state.flush();
+  }
+
   /** Checkpoints and closes every live session and ends the run. Does not relaunch. */
   async stop(reason: PauseReason = 'stop'): Promise<void> {
     if (this.#switching) return;

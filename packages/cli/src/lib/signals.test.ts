@@ -20,6 +20,7 @@ function fakeOrchestrator(): { orch: Orchestrator; stopped: () => boolean } {
     stop: async () => {
       didStop = true;
     },
+    flush: async () => {},
   } as unknown as Orchestrator;
   return { orch, stopped: () => didStop };
 }

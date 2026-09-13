@@ -62,6 +62,13 @@
  *    it: `--permission-mode acceptEdits` does NOT auto-approve Bash. It
  *    approved the `Write` this probe tried and the read-only commands, and
  *    the conclusion was over-generalised from that. See `permissionMode`.
+ *  - A live run showed sessions picking up this machine's user-scope
+ *    plugins, skills and hooks: the root loaded CAPO's own `capo:capo`
+ *    skill and ran `capo status` on its own run, and coordinators loaded
+ *    unrelated skills like `superpowers:systematic-debugging`, with ~37k
+ *    tokens of that system prompt repeated on every turn. `start()` now
+ *    passes `--setting-sources project,local` to drop user-scope settings
+ *    while still honoring a project's own configuration.
  */
 import { type ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -333,6 +340,14 @@ export class ClaudeAdapter implements PlatformAdapter {
       opts.systemPrompt,
       '--permission-mode',
       permissionMode(opts.autonomy),
+      // User-scope settings are where installed plugins, their skills and
+      // hooks live. A live run showed the root loading CAPO's own plugin skill
+      // and driving `capo status` against its own run, and coordinators
+      // loading unrelated skills; each turn also carried ~37k tokens of that
+      // system prompt. Project and local settings still apply, so a project's
+      // own configuration is honored.
+      '--setting-sources',
+      'project,local',
     ];
 
     const child: ChildProcessWithoutNullStreams = spawn(this.executable, args, {

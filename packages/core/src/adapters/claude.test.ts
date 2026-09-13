@@ -33,6 +33,7 @@ describe('ClaudeAdapter argv', () => {
     expect(argv).toContain('--permission-mode');
     expect(argv).toContain('bypassPermissions');
     expect(argv).toContain('-p');
+    expect(a.lastArgv).toEqual(expect.arrayContaining(['--setting-sources', 'project,local']));
 
     await s.close();
   });

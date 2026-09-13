@@ -243,6 +243,13 @@ tests or `git commit`, which means it could never finish a task. A live run
 died on exactly that. On Codex it is `--approve-for-me`, which keeps the
 workspace-write sandbox.
 
+Claude Code sessions are launched with `--setting-sources project,local`, so
+plugins, skills and hooks installed at user scope on your machine are not
+loaded into them. A live run showed a root session picking up CAPO's own
+plugin skill and treating itself as the control panel. Codex has no
+equivalent flag, so Codex sessions still see every plugin in
+`~/.codex/config.toml`; the root's read-only sandbox is what bounds it there.
+
 What bounds it is where sessions run. Every coordinator is confined to its
 own git worktree on its own branch, nothing merges into your tree until CAPO
 has re-checked the diff against that coordinator's declared write scope, and

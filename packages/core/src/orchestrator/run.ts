@@ -291,6 +291,18 @@ export class Orchestrator {
       await this.#doSwitch(to, reason);
     } finally {
       this.#switching = false;
+      // A result can arrive from a coordinator while this switch is
+      // checkpointing and relaunching everyone: `#maybeIntegrate` (called
+      // from `#handleResult`) deliberately bails out while `#switching` is
+      // true, on the assumption that the switch itself, or a session
+      // reporting again after the relaunch, will trigger the check later.
+      // Neither is guaranteed -- a relaunched coordinator that already said
+      // everything it had to say has no reason to send anything else -- so
+      // a run where every task's result showed up mid-switch could sit in
+      // `review` forever. Re-check right here, now that `#switching` is
+      // false again; a no-op (via `#integrating`/`#switching` guards and the
+      // "every task reported" check) whenever tasks are still outstanding.
+      void this.#maybeIntegrate();
     }
   }
 

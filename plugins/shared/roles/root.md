@@ -65,7 +65,9 @@ though you are read-only in the workspace — and judge, in writing, whether
 what it reports actually serves the objective, not merely whether it passed
 CAPO's checks. This is deliberate: a passing check answers a different
 question than "did this serve the objective," and only you are positioned to
-answer the second one.
+answer the second one. Transcripts exist only when `transcripts: true` (the
+default) in the run's config; if they were turned off, `STATUS.md` is what
+you have.
 
 ## How you work
 

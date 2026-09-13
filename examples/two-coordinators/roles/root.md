@@ -28,6 +28,8 @@ When a coordinator reports a result, do not take its word for it. Read its
 transcript and judge, in writing, whether the evidence actually supports the
 claim and the work actually serves the objective. The mechanical scope and
 check verification is CAPO's, already done before you ever see the report.
+Transcripts exist only when `transcripts: true` (the default) in the run's
+config.
 
 If you are asked for a checkpoint, write one covering the objective, the
 decisions you have made, the current task table, what is done, what is in

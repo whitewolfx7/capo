@@ -15,7 +15,10 @@ resting only on fake ones:
   only because it does no work there. Where a coordinator owns several tasks
   they share its worktree, so its results are checked against the union of
   what that coordinator owns — the boundary strictly enforced is the one
-  between coordinators.
+  between coordinators. The root is launched read-only on both platforms —
+  Claude Code plan mode, Codex's `--sandbox read-only` — regardless of the
+  run's configured `autonomy`, so a root that tries to edit, commit, or spawn
+  a writing subagent fails mechanically instead of merely being told not to.
 - The result protocol and integration: a coordinator reports a finished task
   as a fenced `# Result:` block naming its commit, tasks move
   `ready` -> `running` -> `review` -> `done`/`failed`, and once every task has
@@ -40,6 +43,18 @@ resting only on fake ones:
   stall watchdog marks a session `stalled` — in state, `STATUS.md`, and its
   transcript — once it goes quiet past `stallTimeoutMs`. That is the only
   thing it does: it does not act on a stall or answer it.
+- Checkpoints are re-requested once at turn-end if a session's first reply
+  carried none, and always augmented with facts read straight from git —
+  commits since base and uncommitted paths in that session's worktree — which
+  a session cannot misreport. On a usage-limit pause no session is asked at
+  all: every checkpoint is synthesized from those git facts, since a capped
+  session may not be able to answer. A coordinator whose turn ends with an
+  open task and no `# Result:` block is nudged, up to `MAX_RESULT_NUDGES`
+  (3) times, then left to the stall watchdog. A result block whose commit
+  isn't a git sha is ignored rather than resolving the task it names, and
+  events from a session that has already been closed — including a stale
+  usage-limit arriving from the platform that just lost activity — are
+  ignored so they cannot re-trigger a switch or park the run.
 - The CLI: `run`, `status`, `switch`, `resume`, `doctor`.
 - Both plugins install into their host. Their built bundles
   (`plugins/*/capo/dist/capo.mjs`) are committed to the repository rather
@@ -151,7 +166,7 @@ coordinators:
   - id: team-a
   - id: team-b
 
-tasks:             # optional; root decomposes the objective if empty
+tasks:             # at least one; each names its coordinator and write scope
   - id: component-a
     coordinator: team-a
     brief: ./tasks/component-a.md

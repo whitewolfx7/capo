@@ -12419,7 +12419,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve4) {
+function isRecursive(inst, stack, resolve7) {
   const cached2 = recursive.get(inst);
   if (cached2 !== void 0)
     return cached2 ? PROVEN : NONE;
@@ -12429,7 +12429,7 @@ function isRecursive(inst, stack, resolve4) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve4);
+      const answer = isRecursive(child, stack, resolve7);
       if (answer > result)
         result = answer;
     }
@@ -12440,7 +12440,7 @@ function isRecursive(inst, stack, resolve4) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve4) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve7) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -12504,7 +12504,7 @@ function isRecursive(inst, stack, resolve4) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve4 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve7 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -27125,6 +27125,12 @@ var configFileSchema = external_exports.object({
   // cannot guess how a project verifies itself. An empty array (the
   // default) means integration accepts a clean merge on its own.
   check_command: external_exports.array(external_exports.string()).default([]),
+  // Run once in every coordinator worktree right after it is created, and
+  // once in the integration worktree after all merges and before
+  // check_command -- e.g. ["npm", "ci"]. A fresh git worktree has no
+  // node_modules, no build output, nothing a real project needs to run its
+  // tests. argv, not a shell string.
+  setup_command: external_exports.array(external_exports.string()).default([]),
   limits: external_exports.object({
     max_workers_per_coordinator: external_exports.number().int().positive().default(2)
   }).strict().default({ max_workers_per_coordinator: 2 })
@@ -27180,6 +27186,7 @@ async function loadConfig(configPath) {
     stallTimeoutMs: file2.stall_timeout_ms,
     autonomy: file2.autonomy,
     checkCommand: file2.check_command,
+    setupCommand: file2.setup_command,
     limits: { maxWorkersPerCoordinator: file2.limits.max_workers_per_coordinator }
   };
   return Object.freeze(cfg);
@@ -27241,6 +27248,9 @@ function validateCoordinators(file2) {
   return seen;
 }
 function validateTasks(file2, coordinatorIds) {
+  if (file2.tasks.length === 0) {
+    throw new CapoError("v0.1 requires at least one task under tasks:", "Declare each unit of work with an id, a coordinator, a brief, and a write_scope. Root-driven decomposition is not implemented.");
+  }
   const seenTaskIds = /* @__PURE__ */ new Set();
   for (const t of file2.tasks) {
     if (seenTaskIds.has(t.id)) {
@@ -27387,6 +27397,15 @@ var StateStore = class _StateStore {
     });
     this.#queue = run.catch(() => void 0);
     return run;
+  }
+  /**
+   * Resolves once every update queued so far has been written to disk.
+   * Teardown awaits this before clearing the pid file: without it, a
+   * process that exits right after its last `update()` call races its own
+   * write, leaving a `state.json.<pid>.<n>.tmp` behind forever.
+   */
+  async flush() {
+    await this.#queue;
   }
   async #write(state) {
     const target = join2(this.dir, STATE_FILE);
@@ -27773,6 +27792,13 @@ async function changedPaths(repo, base, head) {
     return [];
   return out.split("\n").map((p) => p.replace(/\\/g, "/"));
 }
+async function describeWorktree(worktree, base) {
+  const log = await git(worktree, ["log", "--reverse", "--format=%h %s", `${base}..HEAD`]);
+  const commits = log.length === 0 ? [] : log.split("\n");
+  const status = await git(worktree, ["status", "--porcelain"]);
+  const dirty = status.length === 0 ? [] : status.split("\n").map((l) => l.slice(3).trim());
+  return { commits, dirty };
+}
 
 // packages/core/dist/git/scope.js
 function normalize(p) {
@@ -27860,7 +27886,7 @@ var EventQueue = class {
     if (this.ended) {
       return Promise.resolve({ value: void 0, done: true });
     }
-    return new Promise((resolve4) => this.waiting.push(resolve4));
+    return new Promise((resolve7) => this.waiting.push(resolve7));
   }
   [Symbol.asyncIterator]() {
     return { next: () => this.next() };
@@ -28090,7 +28116,7 @@ var EventQueue2 = class {
     if (this.ended) {
       return Promise.resolve({ value: void 0, done: true });
     }
-    return new Promise((resolve4) => this.waiting.push(resolve4));
+    return new Promise((resolve7) => this.waiting.push(resolve7));
   }
   [Symbol.asyncIterator]() {
     return { next: () => this.next() };
@@ -28106,6 +28132,10 @@ function resetsAtToIso(value) {
     return void 0;
   const d = new Date(value * 1e3);
   return Number.isNaN(d.getTime()) ? void 0 : d.toISOString();
+}
+function epochSuffixToIso(text) {
+  const m = /\|(\d{9,11})\b/.exec(text);
+  return m ? resetsAtToIso(Number(m[1])) : void 0;
 }
 function mapLine(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -28156,9 +28186,16 @@ function mapLine(value) {
   }
   if (obj.type === "result") {
     const events = [];
-    if (obj.is_error === true) {
-      const message = typeof obj.result === "string" && obj.result.length > 0 ? obj.result : "claude-code: turn ended with an error";
-      events.push({ kind: "error", message, retryable: false });
+    const text = typeof obj.result === "string" ? obj.result : "";
+    if (obj.is_error === true && USAGE_LIMIT_RE.test(text)) {
+      const resetAt = epochSuffixToIso(text) ?? extractResetAt(text);
+      events.push(resetAt !== void 0 ? { kind: "usage-limit", raw: text, resetAt } : { kind: "usage-limit", raw: text });
+    } else if (obj.is_error === true) {
+      events.push({
+        kind: "error",
+        message: text.length > 0 ? text : "claude-code: turn ended with an error",
+        retryable: false
+      });
     }
     events.push({ kind: "turn-end" });
     return events;
@@ -28232,7 +28269,15 @@ var ClaudeAdapter = class {
       "--append-system-prompt",
       opts.systemPrompt,
       "--permission-mode",
-      permissionMode(opts.autonomy)
+      permissionMode(opts.autonomy),
+      // User-scope settings are where installed plugins, their skills and
+      // hooks live. A live run showed the root loading CAPO's own plugin skill
+      // and driving `capo status` against its own run, and coordinators
+      // loading unrelated skills; each turn also carried ~37k tokens of that
+      // system prompt. Project and local settings still apply, so a project's
+      // own configuration is honored.
+      "--setting-sources",
+      "project,local"
     ];
     const child = spawn(this.executable, args, {
       cwd: opts.cwd,
@@ -28246,16 +28291,16 @@ var ClaudeAdapter = class {
     let platformSessionId;
     let resolveReady;
     let rejectReady;
-    const readyPromise = new Promise((resolve4, reject) => {
-      resolveReady = resolve4;
+    const readyPromise = new Promise((resolve7, reject) => {
+      resolveReady = resolve7;
       rejectReady = reject;
     });
-    const exitPromise = new Promise((resolve4) => {
+    const exitPromise = new Promise((resolve7) => {
       child.once("exit", (code) => {
         exited = true;
         exitCode = code;
         queue.push({ kind: "exit", code });
-        resolve4();
+        resolve7();
         rejectReady?.(new Error(`claude-code: process exited (code ${String(code)}) before session became ready`));
       });
     });
@@ -28312,12 +28357,12 @@ var ClaudeAdapter = class {
         if (closed || exited) {
           throw new Error(`claude-code: cannot send to session "${sessionId}": session is closed`);
         }
-        await new Promise((resolve4, reject) => {
+        await new Promise((resolve7, reject) => {
           child.stdin.write(userMessageLine(text), (err) => {
             if (err)
               reject(err);
             else
-              resolve4();
+              resolve7();
           });
         });
       },
@@ -28338,7 +28383,7 @@ var ClaudeAdapter = class {
         } catch {
         }
         if (!exited) {
-          await new Promise((resolve4) => {
+          await new Promise((resolve7) => {
             const timer = setTimeout(() => {
               if (!exited) {
                 try {
@@ -28349,7 +28394,7 @@ var ClaudeAdapter = class {
             }, 5e3);
             exitPromise.then(() => {
               clearTimeout(timer);
-              resolve4();
+              resolve7();
             });
           });
         }
@@ -28409,14 +28454,14 @@ var EventQueue3 = class {
     if (this.ended) {
       return Promise.resolve({ value: void 0, done: true });
     }
-    return new Promise((resolve4) => this.waiting.push(resolve4));
+    return new Promise((resolve7) => this.waiting.push(resolve7));
   }
   [Symbol.asyncIterator]() {
     return { next: () => this.next() };
   }
 };
 function execCapture(executable, args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve7, reject) => {
     const child = spawn2(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -28427,7 +28472,7 @@ function execCapture(executable, args) {
       stderr += chunk.toString("utf8");
     });
     child.on("error", (err) => reject(err));
-    child.on("close", (code) => resolve4({ code, stdout, stderr }));
+    child.on("close", (code) => resolve7({ code, stdout, stderr }));
   });
 }
 function autonomyFlags(level) {
@@ -28435,7 +28480,7 @@ function autonomyFlags(level) {
     case "autonomous":
       return ["--approve-for-me"];
     case "supervised":
-      return [];
+      return ["--sandbox", "read-only"];
   }
 }
 var CodexAdapterSession = class {
@@ -28475,13 +28520,13 @@ var CodexAdapterSession = class {
   begin(opts) {
     this.autonomyArgs = autonomyFlags(opts.autonomy);
     const args = ["exec", ...this.autonomyArgs, "--json", "-m", opts.model, composeFirstTurn(opts)];
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve7, reject) => {
       let settled = false;
       const onReady = () => {
         if (settled)
           return;
         settled = true;
-        resolve4();
+        resolve7();
       };
       const run = this.enqueueTurn(args, onReady);
       run.catch((err) => {
@@ -28501,8 +28546,8 @@ var CodexAdapterSession = class {
     }
     const args = ["exec", ...this.autonomyArgs, "resume", this.platformSessionId, "--json", text];
     let resolveSpawned;
-    const spawned = new Promise((resolve4) => {
-      resolveSpawned = resolve4;
+    const spawned = new Promise((resolve7) => {
+      resolveSpawned = resolve7;
     });
     const run = this.enqueueTurn(args, void 0, resolveSpawned);
     run.catch(() => {
@@ -28579,13 +28624,13 @@ var CodexAdapterSession = class {
         });
       }
     }
-    const code = await new Promise((resolve4) => {
+    const code = await new Promise((resolve7) => {
       if (child.exitCode !== null) {
-        resolve4(child.exitCode);
+        resolve7(child.exitCode);
         return;
       }
-      child.once("exit", (exitCode) => resolve4(exitCode));
-      child.once("error", () => resolve4(null));
+      child.once("exit", (exitCode) => resolve7(exitCode));
+      child.once("error", () => resolve7(null));
     });
     this.currentChild = void 0;
     if (this.closed)
@@ -28851,6 +28896,14 @@ var CHECKPOINT_REQUEST = [
   'on the other platform sees only this checkpoint -- an empty "## Done" tells it that nothing',
   "has been done, and it will redo work you have already committed."
 ].join("\n");
+var MAX_RESULT_NUDGES = 3;
+function renderResultNudge(taskIds) {
+  return [
+    `CAPO: your turn ended but task(s) ${taskIds.join(", ")} are still open -- no \`# Result:\` block has been received.`,
+    'If the work is committed in your worktree, reply now with the fenced result block described under "Result protocol".',
+    "If you are blocked, state the blocker in one paragraph and stop. Do not start unrelated work."
+  ].join("\n");
+}
 function extractCheckpoint(text) {
   const fenceRe = /```[^\n`]*\n([\s\S]*?)\n```/g;
   let match;
@@ -28944,9 +28997,11 @@ function renderWorkerDelegation(config2, platform) {
 }
 
 // packages/core/dist/orchestrator/run.js
+import { execFile as execFileCb3 } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { readFile as readFile4, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join6 } from "node:path";
+import { promisify as promisify4 } from "node:util";
 
 // packages/core/dist/orchestrator/transcript.js
 import { appendFile, mkdir as mkdir3 } from "node:fs/promises";
@@ -28985,8 +29040,10 @@ function renderEvent(event) {
         ""
       ].join("\n");
     case "error":
-      return `
-> **error**${event.retryable ? " (retryable)" : ""}: ${event.message}
+      return event.retryable ? `
+> _warning_: ${event.message}
+` : `
+> **error**: ${event.message}
 `;
     case "turn-end":
       return "\n---\n";
@@ -29060,7 +29117,7 @@ async function inMerge(worktree) {
   }
 }
 async function integrate(opts) {
-  const { repo, runDir: runDir2, baseCommit, tasks, submissions, checkCommand, identity } = opts;
+  const { repo, runDir: runDir2, baseCommit, tasks, submissions, checkCommand, setupCommand, identity } = opts;
   const worktree = join5(runDir2, "integration");
   const branch = `capo/integration/${basename(runDir2)}`;
   await removeWorktree(repo, worktree);
@@ -29093,6 +29150,15 @@ async function integrate(opts) {
   }
   let checksPassed = true;
   let checkOutput = "";
+  if (setupCommand && setupCommand.length > 0) {
+    const [cmd, ...args] = setupCommand;
+    try {
+      await execFile3(cmd, args, { cwd: worktree, maxBuffer: MAX_BUFFER2 });
+    } catch (err) {
+      return { merged, conflicted, checksPassed: false, checkOutput: `setup_command failed:
+${execErrorOutput(err)}` };
+    }
+  }
   if (checkCommand && checkCommand.length > 0) {
     const [cmd, ...args] = checkCommand;
     try {
@@ -29118,6 +29184,7 @@ function execErrorOutput(err) {
 }
 
 // packages/core/dist/orchestrator/run.js
+var execFile4 = promisify4(execFileCb3);
 var CHECKPOINT_TIMEOUT_MS = 6e4;
 var Orchestrator = class {
   events = new EventEmitter();
@@ -29128,6 +29195,13 @@ var Orchestrator = class {
   #log;
   #live = /* @__PURE__ */ new Map();
   #pending = /* @__PURE__ */ new Map();
+  // Sessions the orchestrator has already re-asked for a checkpoint once, at
+  // `turn-end`. See the `turn-end` case in `#onEvent`: a request injected
+  // mid-turn can be answered by the model finishing its own turn instead of
+  // replying to the request, so the request is sent again exactly once.
+  // `#requestCheckpoint`'s `finish` deletes a session's entry the moment its
+  // checkpoint is in hand, so a session that later pauses again starts clean.
+  #checkpointResent = /* @__PURE__ */ new Set();
   // Accepted-shape results, keyed by task id, kept in memory as they arrive
   // (see `#handleResult`). Rebuilt from `state.json` on construction so a
   // resumed orchestrator does not lose results a dead process already
@@ -29147,6 +29221,11 @@ var Orchestrator = class {
   #stalledSet = /* @__PURE__ */ new Set();
   #stallPollMs;
   #stallTimer;
+  // How many times each coordinator has been nudged (see the `turn-end` case
+  // in `#onEvent`) for turning without a result. Reset to 0 on every launch
+  // in `#launchOne`, and dropped wherever `#lastEventAt` is, so a session
+  // that relaunches -- after a switch, or a fresh run -- starts clean.
+  #nudges = /* @__PURE__ */ new Map();
   #switching = false;
   constructor(opts) {
     this.#config = opts.config;
@@ -29197,6 +29276,7 @@ var Orchestrator = class {
       const worktree = this.#worktreeFor(coordinator.id);
       const branch = `capo/${this.#state.get().runId}/${coordinator.id}`;
       await addWorktree(this.#config.workspace, worktree, branch, base);
+      await this.#runSetup(worktree);
       worktrees.set(coordinator.id, { worktree, branch });
     }
     const taskRecords = [];
@@ -29282,6 +29362,15 @@ var Orchestrator = class {
       this.#switching = false;
     }
   }
+  /**
+   * Resolves once every state write queued so far has landed on disk. Exit
+   * teardown (`blockUntilStopped`) awaits this before clearing the pid file,
+   * so a process that exits right after its last state update doesn't race
+   * its own write and leave a `state.json.<pid>.<n>.tmp` behind.
+   */
+  async flush() {
+    await this.#state.flush();
+  }
   /** Checkpoints and closes every live session and ends the run. Does not relaunch. */
   async stop(reason = "stop") {
     if (this.#switching)
@@ -29350,8 +29439,8 @@ var Orchestrator = class {
     const entries = [...this.#live.entries()];
     const results = /* @__PURE__ */ new Map();
     await Promise.all(entries.map(async ([sessionId, live]) => {
-      const cp = await this.#requestCheckpoint(sessionId, live, reason);
-      results.set(sessionId, this.#stampCheckpoint(sessionId, live, cp));
+      const cp = reason === "usage-limit" ? this.#synthesizeCheckpoint(sessionId, live, reason) : await this.#requestCheckpoint(sessionId, live, reason);
+      results.set(sessionId, await this.#stampCheckpoint(sessionId, live, cp));
     }));
     const stateAfterIncrement = await this.#update((draft) => {
       draft.pauseCount += 1;
@@ -29368,6 +29457,7 @@ var Orchestrator = class {
     for (const [sessionId] of entries) {
       this.#live.delete(sessionId);
       this.#lastEventAt.delete(sessionId);
+      this.#nudges.delete(sessionId);
       this.#stalledSet.delete(sessionId);
     }
     return results;
@@ -29456,10 +29546,19 @@ var Orchestrator = class {
    * So the division is: the session supplies the narrative, which only it
    * knows, and CAPO supplies the facts, which only CAPO knows. Anything the
    * session says about identity is discarded rather than trusted.
+   *
+   * For a coordinator, CAPO also augments "## Done" and "## In progress"
+   * with what `describeWorktree` reads straight out of its git worktree:
+   * commits made since the run's base, and paths left uncommitted. A live
+   * switch produced an empty checkpoint because the request was injected
+   * mid-turn and the model answered its own turn instead -- but the
+   * coordinator's worktree still had the commit it made sitting right there.
+   * This is the part of a checkpoint a session cannot misreport, so it is
+   * never skipped, even when the session's own narrative came through fine.
    */
-  #stampCheckpoint(sessionId, live, cp) {
+  async #stampCheckpoint(sessionId, live, cp) {
     const state = this.#state.get();
-    return {
+    const stamped = {
       ...cp,
       sessionId,
       runId: state.runId,
@@ -29468,9 +29567,27 @@ var Orchestrator = class {
       written: (/* @__PURE__ */ new Date()).toISOString(),
       baseCommit: state.baseCommit
     };
+    if (live.role !== "coordinator")
+      return stamped;
+    try {
+      const { commits, dirty } = await describeWorktree(this.#cwdFor("coordinator", sessionId), state.baseCommit);
+      for (const c of commits) {
+        const sha = c.split(" ")[0] ?? "";
+        if (!stamped.done.some((d) => d.includes(sha)))
+          stamped.done.push(`commit ${c}`);
+      }
+      if (dirty.length > 0) {
+        const line = `uncommitted in worktree: ${dirty.join(", ")}`;
+        if (!stamped.inProgress.includes(line))
+          stamped.inProgress.unshift(line);
+      }
+    } catch (err) {
+      this.#log(`[${sessionId}] could not read worktree for checkpoint: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return stamped;
   }
   #requestCheckpoint(sessionId, live, reason) {
-    return new Promise((resolve4) => {
+    return new Promise((resolve7) => {
       let settled = false;
       const finish = (cp) => {
         if (settled)
@@ -29478,7 +29595,8 @@ var Orchestrator = class {
         settled = true;
         clearTimeout(timer);
         this.#pending.delete(sessionId);
-        resolve4(cp);
+        this.#checkpointResent.delete(sessionId);
+        resolve7(cp);
       };
       const timer = setTimeout(() => {
         finish(this.#synthesizeCheckpoint(sessionId, live, reason));
@@ -29498,7 +29616,7 @@ var Orchestrator = class {
       platform: live.platform,
       written: (/* @__PURE__ */ new Date()).toISOString(),
       baseCommit: state.baseCommit,
-      objective: "(synthesized: this session did not reply to the checkpoint request in time)",
+      objective: reason === "usage-limit" ? "(synthesized: platform usage limit; the session could not be asked)" : "(synthesized: this session did not reply to the checkpoint request in time)",
       decisions: [],
       done: [],
       inProgress: [],
@@ -29547,6 +29665,24 @@ var Orchestrator = class {
   #worktreeFor(sessionId) {
     return join6(this.#runDir, "worktrees", sessionId);
   }
+  /**
+   * Runs `config.setupCommand` once in a freshly created worktree, before
+   * anything else happens in it. A fresh git worktree has no node_modules,
+   * no build output -- nothing a real project needs to run its tests, so
+   * without this every coordinator (and later, `checkCommand`) starts from
+   * an environment that cannot actually work. No-op when unset.
+   */
+  async #runSetup(cwd) {
+    const [cmd, ...args] = this.#config.setupCommand;
+    if (cmd === void 0)
+      return;
+    try {
+      await execFile4(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new CapoError(`setup_command failed in ${cwd}: ${detail}`, "fix setup_command in the config, or run it by hand in that worktree and resume");
+    }
+  }
   #cwdFor(role, sessionId) {
     if (role !== "coordinator")
       return this.#config.workspace;
@@ -29574,7 +29710,10 @@ var Orchestrator = class {
       cwd: this.#cwdFor(role, sessionId),
       systemPrompt,
       prompt: checkpoint ? "Resume your work from your checkpoint, above." : "Begin work toward the objective, above.",
-      autonomy: this.#config.autonomy
+      // The root sits in the shared workspace. Twice now a live root has written
+      // there (once itself, once through spawned subagents) despite instructions
+      // not to. Instructions are not a boundary; a read-only launch is.
+      autonomy: role === "root" ? "supervised" : this.#config.autonomy
     };
     if (this.#config.transcripts) {
       void appendTranscript(this.#runDir, sessionId, renderSessionHeader(sessionId, platform, model, checkpoint !== void 0));
@@ -29583,6 +29722,7 @@ var Orchestrator = class {
     this.#live.set(sessionId, { session, role, platform });
     this.#lastEventAt.set(sessionId, Date.now());
     this.#stalledSet.delete(sessionId);
+    this.#nudges.set(sessionId, 0);
     await this.#update((draft) => {
       draft.sessions[sessionId] = {
         id: sessionId,
@@ -29604,6 +29744,14 @@ var Orchestrator = class {
   async #pump(sessionId, platform, session) {
     try {
       for await (const event of session.events()) {
+        if (this.#live.get(sessionId)?.session !== session) {
+          if (this.#config.transcripts) {
+            const line = renderEvent(event);
+            if (line !== void 0)
+              void appendTranscript(this.#runDir, sessionId, line);
+          }
+          continue;
+        }
         await this.#onEvent(sessionId, platform, event);
       }
     } catch (err) {
@@ -29614,6 +29762,7 @@ var Orchestrator = class {
       return;
     this.#live.delete(sessionId);
     this.#lastEventAt.delete(sessionId);
+    this.#nudges.delete(sessionId);
     this.#stalledSet.delete(sessionId);
     try {
       await this.#update((draft) => {
@@ -29705,6 +29854,10 @@ var Orchestrator = class {
         break;
       }
       case "usage-limit": {
+        if (platform !== this.#state.get().activePlatform) {
+          this.#log(`[${sessionId}] usage-limit from ${platform}, which is no longer active; ignored`);
+          break;
+        }
         await this.#update((draft) => {
           draft.limits[platform] = {
             detectedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -29716,6 +29869,27 @@ var Orchestrator = class {
         break;
       }
       case "turn-end": {
+        const resolver = this.#pending.get(sessionId);
+        const live = this.#live.get(sessionId);
+        if (resolver && live && !this.#checkpointResent.has(sessionId)) {
+          this.#checkpointResent.add(sessionId);
+          this.#log(`[${sessionId}] no checkpoint in its last turn; asking once more`);
+          live.session.send(CHECKPOINT_REQUEST).catch(() => {
+          });
+        }
+        if (live && live.role === "coordinator" && !resolver && !this.#switching && !this.#integrating) {
+          const open3 = Object.values(this.#state.get().tasks).filter((t) => t.coordinator === sessionId && t.state === "running").map((t) => t.id);
+          const count = this.#nudges.get(sessionId) ?? 0;
+          if (open3.length > 0 && count < MAX_RESULT_NUDGES) {
+            this.#nudges.set(sessionId, count + 1);
+            this.#log(`[${sessionId}] turn ended with ${open3.join(", ")} still open; nudge ${count + 1}/${MAX_RESULT_NUDGES}`);
+            live.session.send(renderResultNudge(open3)).catch(() => {
+            });
+          } else if (open3.length > 0 && count === MAX_RESULT_NUDGES) {
+            this.#nudges.set(sessionId, count + 1);
+            this.#log(`[${sessionId}] no result after ${MAX_RESULT_NUDGES} nudges; leaving it to the stall watchdog`);
+          }
+        }
         break;
       }
       case "error": {
@@ -29756,6 +29930,10 @@ var Orchestrator = class {
       raw = parseResult(block);
     } catch (err) {
       this.#log(`[${sessionId}] could not parse result: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    if (!/^[0-9a-f]{7,40}$/i.test(raw.resultCommit)) {
+      this.#log(`[${sessionId}] result ignored: commit "${raw.resultCommit}" is not a git sha`);
       return;
     }
     const state = this.#state.get();
@@ -29852,7 +30030,8 @@ var Orchestrator = class {
         baseCommit: state.baseCommit,
         tasks,
         submissions: accepted,
-        checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : void 0
+        checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : void 0,
+        setupCommand: this.#config.setupCommand.length > 0 ? this.#config.setupCommand : void 0
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -29912,6 +30091,7 @@ var Orchestrator = class {
     for (const [sessionId] of liveEntries) {
       this.#live.delete(sessionId);
       this.#lastEventAt.delete(sessionId);
+      this.#nudges.delete(sessionId);
       this.#stalledSet.delete(sessionId);
     }
     this.#stopStallWatch();
@@ -30075,7 +30255,7 @@ async function writeControlRequest(dir, req) {
 
 // packages/cli/dist/lib/signals.js
 function blockUntilStopped(orchestrator, dir, log) {
-  return new Promise((resolve4) => {
+  return new Promise((resolve7) => {
     const keepAlive = setInterval(() => {
     }, 1 << 30);
     const onControlSignal = () => {
@@ -30089,7 +30269,8 @@ function blockUntilStopped(orchestrator, dir, log) {
       orchestrator.events.off("integration-finished", onIntegrationFinished);
       orchestrator.events.off("abandoned", onAbandoned);
       clearInterval(keepAlive);
-      void clearPidFile(dir).finally(resolve4);
+      void orchestrator.flush().catch(() => {
+      }).then(() => clearPidFile(dir)).finally(resolve7);
     };
     const onStopSignal = () => {
       if (stopping)
@@ -30227,12 +30408,28 @@ async function runDetached(config2, opts, io, selfPath) {
 }
 
 // packages/cli/dist/commands/status.js
-import { resolve as resolve3 } from "node:path";
+import { resolve as resolve4 } from "node:path";
 
 // packages/cli/dist/lib/run-locate.js
-import { readdir as readdir3 } from "node:fs/promises";
-import { join as join12 } from "node:path";
+import { readdir as readdir3, stat as stat4 } from "node:fs/promises";
+import { dirname as dirname2, join as join12, resolve as resolve3 } from "node:path";
 var RUN_ID_RE = /^\d{4}-\d{2}-\d{2}-\d{3}$/;
+async function locateWorkspace(start, runId) {
+  let dir = resolve3(start);
+  for (; ; ) {
+    const probe = runId ? join12(capoDir(dir), "runs", runId) : join12(capoDir(dir), "runs");
+    try {
+      await stat4(probe);
+      return dir;
+    } catch {
+    }
+    const parent = dirname2(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  throw new CapoError(runId ? `no run ${runId} found at or above ${resolve3(start)}` : `no run found at or above ${resolve3(start)}`, "pass --workspace <dir>, or run this from inside the project the run was started in");
+}
 async function latestRunId(workspace) {
   const runsDir = join12(capoDir(workspace), "runs");
   let entries;
@@ -30256,8 +30453,8 @@ function noRunFound(workspace) {
 
 // packages/cli/dist/commands/status.js
 async function runStatus(opts, io) {
-  const workspace = opts.workspace !== void 0 ? resolve3(opts.workspace) : process.cwd();
   try {
+    const workspace = opts.workspace !== void 0 ? resolve4(opts.workspace) : await locateWorkspace(process.cwd(), opts.runId);
     const runId = opts.runId ?? await latestRunId(workspace);
     const dir = runDir(workspace, runId);
     const state = await readState(dir);
@@ -30323,13 +30520,20 @@ function renderHuman(state, live, runId) {
 }
 
 // packages/cli/dist/commands/switch.js
+import { resolve as resolve5 } from "node:path";
 async function runSwitch(opts, io) {
-  const workspace = process.cwd();
-  const dir = runDir(workspace, opts.runId);
+  let dir;
+  let state;
   try {
-    await readState(dir);
+    const workspace = opts.workspace !== void 0 ? resolve5(opts.workspace) : await locateWorkspace(process.cwd(), opts.runId);
+    dir = runDir(workspace, opts.runId);
+    state = await readState(dir);
   } catch (err) {
     return reportError(err, io);
+  }
+  if (state.status === "done" || state.status === "failed") {
+    io.err(`run ${opts.runId} is already ${state.status}; nothing to switch`);
+    return 1;
   }
   const pid = await readPidFile(dir);
   if (pid === void 0 || !isPidAlive(pid)) {
@@ -30348,10 +30552,12 @@ async function runSwitch(opts, io) {
 }
 
 // packages/cli/dist/commands/resume.js
+import { resolve as resolve6 } from "node:path";
 async function runResume(opts, io) {
-  const workspace = process.cwd();
-  const dir = runDir(workspace, opts.runId);
+  let dir;
   try {
+    const workspace = opts.workspace !== void 0 ? resolve6(opts.workspace) : await locateWorkspace(process.cwd(), opts.runId);
+    dir = runDir(workspace, opts.runId);
     await readState(dir);
   } catch (err) {
     return reportError(err, io);
@@ -30378,11 +30584,11 @@ async function runResume(opts, io) {
 }
 
 // packages/cli/dist/commands/doctor.js
-import { execFile as execFileCb3 } from "node:child_process";
+import { execFile as execFileCb4 } from "node:child_process";
 import { mkdir as mkdir5, rm as rm2, writeFile as writeFile6 } from "node:fs/promises";
 import { join as join13 } from "node:path";
-import { promisify as promisify4 } from "node:util";
-var execFile4 = promisify4(execFileCb3);
+import { promisify as promisify5 } from "node:util";
+var execFile5 = promisify5(execFileCb4);
 async function runDoctor(opts, io) {
   const workspace = process.cwd();
   const [node2, git2, capo, claudeCode, codex] = await Promise.all([
@@ -30422,13 +30628,13 @@ function checkNode() {
 }
 async function checkGit() {
   try {
-    const { stdout } = await execFile4("git", ["--version"], { timeout: 1e4 });
+    const { stdout } = await execFile5("git", ["--version"], { timeout: 1e4 });
     const version2 = stdout.trim();
     if (version2.length === 0) {
       return { ok: false, problems: ["`git --version` printed nothing"] };
     }
     try {
-      await execFile4("git", ["var", "GIT_COMMITTER_IDENT"], { timeout: 1e4 });
+      await execFile5("git", ["var", "GIT_COMMITTER_IDENT"], { timeout: 1e4 });
     } catch {
       return {
         ok: false,
@@ -30473,8 +30679,8 @@ var HELP_TEXT = `capo ${VERSION} -- run one AI agent team across Claude Code and
 Usage:
   capo run --config <path> [--foreground] [--start-on <platform>]
   capo status [<run-id>] [--json] [--workspace <dir>]
-  capo switch <run-id> [--to <platform>]
-  capo resume <run-id>
+  capo switch <run-id> [--to <platform>] [--workspace <dir>]
+  capo resume <run-id> [--workspace <dir>]
   capo doctor [--json]
   capo --version
   capo --help
@@ -30570,7 +30776,7 @@ async function dispatchSwitch(rest, io) {
       args: rest,
       allowPositionals: true,
       strict: true,
-      options: { to: { type: "string" } }
+      options: { to: { type: "string" }, workspace: { type: "string" } }
     }));
   } catch (err) {
     io.err(usageError("switch", err));
@@ -30581,12 +30787,18 @@ async function dispatchSwitch(rest, io) {
     io.err("capo switch requires a <run-id>");
     return 2;
   }
-  return runSwitch({ runId, to: values.to }, io);
+  return runSwitch({ runId, to: values.to, workspace: values.workspace }, io);
 }
 async function dispatchResume(rest, io) {
+  let values;
   let positionals;
   try {
-    ({ positionals } = parseArgs({ args: rest, allowPositionals: true, strict: true, options: {} }));
+    ({ values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      strict: true,
+      options: { workspace: { type: "string" } }
+    }));
   } catch (err) {
     io.err(usageError("resume", err));
     return 2;
@@ -30596,7 +30808,7 @@ async function dispatchResume(rest, io) {
     io.err("capo resume requires a <run-id>");
     return 2;
   }
-  return runResume({ runId }, io);
+  return runResume({ runId, workspace: values.workspace }, io);
 }
 async function dispatchDoctor(rest, io) {
   let values;

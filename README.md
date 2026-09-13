@@ -31,7 +31,11 @@ limit path is exercised against captured fixtures, not a live cap. See
 2. Each role has a **model per platform**. Launching on a platform uses that
    platform's column.
 3. On a **usage limit**, every session checkpoints, all of them close, and the
-   team relaunches on the other platform. The root moves too.
+   team relaunches on the other platform. The root moves too. Checkpoints are
+   augmented with what CAPO can read itself: commits and uncommitted paths in
+   each coordinator's worktree. On a usage limit no session is asked; each
+   gets that mechanical checkpoint. On a hand-forced switch the session is
+   asked, and asked once more if its current turn ends without answering.
 4. When **both** platforms are capped, the run waits for the earliest known
    reset rather than flapping between them.
 5. `capo resume` continues from the latest checkpoint set on disk, so a crash
@@ -68,9 +72,10 @@ close the shell, which matters because the shell is often on the platform that
 is about to get capped.
 
 ```bash
-capo status                 # which platform, which sessions, which tasks
-capo switch <run-id>        # checkpoint and move now, before hitting a limit
-capo resume <run-id>        # continue from the latest checkpoint
+capo status                               # which platform, which sessions, which tasks
+capo switch <run-id> [--workspace <dir>]  # checkpoint and move now, before hitting a limit
+capo resume <run-id> [--workspace <dir>]  # continue from the latest checkpoint
+# from anywhere inside the project, or pass --workspace
 ```
 
 ## Configuration
@@ -255,11 +260,13 @@ plugin skill and treating itself as the control panel. Codex has no
 equivalent flag, so Codex sessions still see every plugin in
 `~/.codex/config.toml`; the root's read-only sandbox is what bounds it there.
 
-What bounds it is where sessions run. Every coordinator is confined to its
-own git worktree on its own branch, nothing merges into your tree until CAPO
-has re-checked the diff against that coordinator's declared write scope, and
-the root — the one session that does sit in your workspace — does no work
-there.
+Be clear about what that grant is and is not. A git worktree bounds where
+*git-tracked changes* land; it does not bound what a process can do. A
+Claude Code session in this mode can run any command on your machine, and
+the Codex sandbox is the only OS-level boundary either platform offers.
+What CAPO adds on top: the root is launched read-only on both platforms,
+every coordinator runs in its own worktree, and nothing merges into your
+tree until CAPO has re-checked the diff against the declared write scope.
 
 Set `autonomy: supervised` for a dry run: sessions read and plan and write
 nothing. Because a headless run has nobody to answer an approval request, a
@@ -299,6 +306,9 @@ Also not done:
   stalls waiting for approval is only marked `stalled` (visible in `capo
   status`, `STATUS.md`, and its transcript); nothing lets a person answer it
   through CAPO. A live Codex coordinator hit exactly this and sat idle.
+- Codex sessions still load every plugin in `~/.codex/config.toml`; there is
+  no per-session isolation flag.
+- A coordinator that ignores three result nudges is only marked stalled.
 
 Found today, while running both adapters for real:
 

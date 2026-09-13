@@ -125,6 +125,53 @@ Three fixes:
 Reproduced locally with `user.useConfigOnly=true` and no global config, which
 is what CI effectively is. The suite now passes under those conditions too.
 
+## The same thing on Claude Code
+
+Recorded 2026-09-13. The same fixture, `start_on: claude`, all three sessions
+on Sonnet. It took two attempts.
+
+The first attempt failed in a way no amount of stub testing would have
+surfaced. Both coordinators wrote the correct fix, then discovered they could
+not run anything. From `team-a`'s transcript, verbatim:
+
+> every mutating/execution Bash command in my session (`node --test ...`,
+> `node -e ...`, `git add`, `git commit`) is being auto-denied with "This
+> command requires approval," while read-only commands (git status, git log,
+> pwd, which, node --version) go through fine.
+
+CAPO launched Claude sessions with `--permission-mode acceptEdits`, which
+accepts file edits and denies mutating Bash. A coordinator that cannot run
+`git commit` can never produce a result commit, so the result protocol is
+unreachable and the run cannot end. Both coordinators independently
+escalated it to the root rather than routing around the restriction, which is
+the behaviour the role instructions ask for and a good sign on its own.
+
+A comment in `adapters/claude.ts` claimed a live run had confirmed
+`acceptEdits` auto-approves Bash. It had not: that probe ran a `Write` and
+some read-only commands, and the conclusion was over-generalised. The comment
+is corrected in place rather than quietly deleted.
+
+`autonomy: autonomous` now maps to a full permission grant on Claude Code.
+That is a real grant and the code says so plainly. What bounds it is that
+every coordinator runs confined to its own git worktree, and `autonomous` is
+the setting whose entire meaning is acting without asking. `supervised` is
+unchanged.
+
+The second attempt finished: both tasks fixed, merged, `node --test` passing
+2/2 over the integrated tree, run `done`, process exited 0.
+
+```
+$ git -C .capo/runs/2026-09-13-001/integration log --oneline -4
+92a6be8 Merge commit '734a006' into capo/integration/2026-09-13-001
+0d67273 Merge commit 'a0e0cd23...' into capo/integration/2026-09-13-001
+734a006 Fix multiply() to return a * b instead of a + b
+a0e0cd2 Fix add() to sum instead of subtract
+```
+
+And the fix from the Codex run held: the root stayed out of the work. The
+workspace's `main` carried no commits from it, where the first finished run
+had two.
+
 ## Still unproven
 
 - A run that spans a platform switch mid-task, end to end.

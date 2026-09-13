@@ -13,10 +13,11 @@ the entire team, root included, relaunches on the other platform from those
 checkpoints. Two subscriptions you already pay for, one continuous session of
 work.
 
-Status: v0.1. Both platform adapters have run against their real CLIs, not
-just a stub, and a full run has finished end to end on live Codex: two
-coordinators fixed their own bug in their own worktree, reported results,
-and CAPO merged both, ran the combined check, and exited on its own — see
+Status: v0.1. Full runs have finished end to end on **both** platforms
+against their real CLIs — two coordinators, each in its own worktree, fixing
+their own bug, reporting results, and CAPO merging both, running the combined
+check, and exiting on its own. Every one of those runs found defects a green
+test suite could not see; they are written up in
 [docs/notes/first-complete-run.md](docs/notes/first-complete-run.md). One
 thing that would make this a finished product is still unproven: **no real
 usage limit has ever fired**, which is the whole reason CAPO exists. Every
@@ -227,6 +228,30 @@ When integration finishes, the run ends and the process exits on its own.
 
 CAPO commits with your own git identity and your own signing configuration. It
 will tell you if git has no identity configured rather than inventing one.
+
+## What sessions are allowed to do
+
+`autonomy` decides this, and the default is `autonomous`, which means what it
+says: sessions act without asking. Nobody is watching a headless run, so
+there is no one to approve anything mid-flight.
+
+On Claude Code that is a **full permission grant** — the session may run any
+command. It has to be: the narrower mode accepts file edits but denies every
+mutating Bash call, so a coordinator could write a fix and then never run the
+tests or `git commit`, which means it could never finish a task. A live run
+died on exactly that. On Codex it is `--approve-for-me`, which keeps the
+workspace-write sandbox.
+
+What bounds it is where sessions run. Every coordinator is confined to its
+own git worktree on its own branch, nothing merges into your tree until CAPO
+has re-checked the diff against that coordinator's declared write scope, and
+the root — the one session that does sit in your workspace — does no work
+there.
+
+Set `autonomy: supervised` for a dry run: sessions read and plan and write
+nothing. Because a headless run has nobody to answer an approval request, a
+supervised run will stop rather than make changes. That is the setting, not a
+bug.
 
 ## Installing as a plugin
 

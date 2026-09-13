@@ -10,13 +10,13 @@ export const configFileSchema = z
     version: z.literal(1),
     workspace: z.string().default('.'),
     objective: z.string(),
-    platforms: z.record(z.object({ driver: z.string().min(1) }).strict()),
+    platforms: z.record(z.string(), z.object({ driver: z.string().min(1) }).strict()),
     start_on: z.string(),
     models: z
       .object({
-        root: z.record(z.string()),
-        coordinator: z.record(z.string()),
-        worker: z.record(z.string()),
+        root: z.record(z.string(), z.string()),
+        coordinator: z.record(z.string(), z.string()),
+        worker: z.record(z.string(), z.string()),
       })
       .strict(),
     roles: z
@@ -84,7 +84,11 @@ export const configFileSchema = z
         max_workers_per_coordinator: z.number().int().positive().default(2),
       })
       .strict()
-      .default({}),
+      // Zod 4 no longer re-parses a top-level default through the inner
+      // schema (https://zod.dev/v4/changelog -- defaults are applied once,
+      // statically), so the fallback must already be the fully-defaulted
+      // shape rather than `{}`.
+      .default({ max_workers_per_coordinator: 2 }),
   })
   .strict();
 

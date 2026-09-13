@@ -11470,22 +11470,24 @@ var configFileSchema = external_exports.object({
   // stalls. That is the exact bug this setting was added to fix, and a
   // default that reproduces it fixes nothing.
   //
-  // This is not a permissiveness increase for Claude Code, which CAPO has
-  // always launched with --permission-mode acceptEdits. It brings Codex up to
-  // the same footing via --approve-for-me, which keeps the workspace-write
-  // sandbox, rather than --dangerously-bypass-approvals-and-sandbox.
+  // Read `autonomous` as what it says: the session acts without asking.
+  // On Codex that is --approve-for-me, which keeps the workspace-write
+  // sandbox rather than --dangerously-bypass-approvals-and-sandbox. On
+  // Claude Code it is a full permission grant, because the narrower mode
+  // denies every mutating Bash call and a coordinator that cannot run
+  // `git commit` can never finish a task. Both are bounded the same way:
+  // a coordinator only ever runs inside its own git worktree.
   //
-  // What makes that defensible: a coordinator owning one task runs in that
-  // task's own git worktree, not the user's working tree, and every task
-  // declares a write scope that integrate/merge.ts re-checks against each
-  // submitted diff, renames included.
+  // What makes that defensible: every coordinator runs in its own git
+  // worktree rather than your working tree, however many tasks it owns,
+  // and every result is re-checked against the write scope its coordinator
+  // declared before anything merges -- renames included.
   //
-  // Read that precisely. A coordinator owning SEVERAL tasks still runs in
-  // the shared workspace, because a per-task worktree cannot be picked for
-  // it, and integration is not yet wired into a run at all. So today the
-  // real guard is the write scope and your own review of the diff, not
-  // filesystem isolation. Give each coordinator exactly one task if you want
-  // the isolation this argument assumes.
+  // Two limits worth reading precisely. The root runs in the shared
+  // workspace, because it does no work there. And a coordinator's own
+  // tasks share one worktree, so the scope check between two tasks of the
+  // SAME coordinator is their union; the boundary that is strictly
+  // enforced is the one between coordinators.
   //
   // Set `autonomy: supervised` for a dry run: sessions read and plan but do
   // not write.
@@ -12731,7 +12733,7 @@ var ClaudeAdapter = class {
   }
 };
 function permissionMode(level) {
-  return (level ?? "autonomous") === "supervised" ? "plan" : "acceptEdits";
+  return (level ?? "autonomous") === "supervised" ? "plan" : "bypassPermissions";
 }
 
 // packages/core/dist/adapters/codex.js
@@ -13392,7 +13394,7 @@ import { promisify as promisify3 } from "node:util";
 import { basename, join as join5 } from "node:path";
 var execFile3 = promisify3(execFileCb2);
 var MAX_BUFFER2 = 16 * 1024 * 1024;
-async function acceptResult(repo, task, sub) {
+async function acceptResult(repo, task, sub, allowedScope = task.writeScope) {
   if (sub.baseCommit !== task.baseCommit) {
     return {
       accepted: false,
@@ -13406,7 +13408,7 @@ async function acceptResult(repo, task, sub) {
     return { accepted: false, reason: "result commit not found", violations: [] };
   }
   const paths = await changedPaths(repo, sub.baseCommit, sub.resultCommit);
-  const { ok, violations } = checkScope(paths, task.writeScope);
+  const { ok, violations } = checkScope(paths, allowedScope);
   if (!ok) {
     return { accepted: false, reason: "result writes outside its approved write scope", violations };
   }
@@ -13553,19 +13555,27 @@ var Orchestrator = class {
   async start() {
     await assertAuthorIdentity(this.#config.workspace);
     const base = await headCommit(this.#config.workspace);
+    const worktrees = /* @__PURE__ */ new Map();
+    for (const coordinator of this.#config.coordinators) {
+      const worktree = this.#worktreeFor(coordinator.id);
+      const branch = `capo/${this.#state.get().runId}/${coordinator.id}`;
+      await addWorktree(this.#config.workspace, worktree, branch, base);
+      worktrees.set(coordinator.id, { worktree, branch });
+    }
     const taskRecords = [];
     for (const task of this.#config.tasks) {
-      const worktree = join6(this.#runDir, "worktrees", task.id);
-      const branch = `capo/${this.#state.get().runId}/${task.id}`;
-      await addWorktree(this.#config.workspace, worktree, branch, base);
+      const owner = worktrees.get(task.coordinator);
+      if (!owner) {
+        throw new CapoError(`task "${task.id}" is assigned to coordinator "${task.coordinator}", which is not declared under coordinators:`);
+      }
       taskRecords.push({
         id: task.id,
         coordinator: task.coordinator,
         briefPath: task.brief,
         writeScope: task.writeScope,
         state: "ready",
-        worktree,
-        branch,
+        worktree: owner.worktree,
+        branch: owner.branch,
         baseCommit: base
       });
     }
@@ -13896,17 +13906,15 @@ var Orchestrator = class {
    * several is genuinely ambiguous under the current per-task worktree model,
    * so it stays in the workspace and says so, rather than silently picking one.
    */
+  /** Where a coordinator's worktree lives. Derived, so resume needs no map. */
+  #worktreeFor(sessionId) {
+    return join6(this.#runDir, "worktrees", sessionId);
+  }
   #cwdFor(role, sessionId) {
     if (role !== "coordinator")
       return this.#config.workspace;
     const owned = Object.values(this.#state.get().tasks).filter((t) => t.coordinator === sessionId);
-    const only = owned.length === 1 ? owned[0] : void 0;
-    if (only?.worktree !== void 0)
-      return only.worktree;
-    if (owned.length > 1) {
-      this.#log(`[${sessionId}] owns ${owned.length} tasks, so it runs in the shared workspace rather than an isolated worktree. Give each coordinator one task for isolation.`);
-    }
-    return this.#config.workspace;
+    return owned.find((t) => t.worktree !== void 0)?.worktree ?? this.#worktreeFor(sessionId);
   }
   async #launchOne(adapter, platform, sessionId, role, contextFiles, roleInstructions, checkpoint) {
     const model = this.#config.models[role][platform];
@@ -14192,7 +14200,7 @@ var Orchestrator = class {
       const sub = this.#submissions.get(task.id);
       if (!sub)
         continue;
-      const outcome = await acceptResult(this.#config.workspace, task, sub);
+      const outcome = await acceptResult(this.#config.workspace, task, sub, ownedScope(tasks, task.coordinator));
       if (outcome.accepted) {
         accepted.set(task.id, sub);
       } else {
@@ -14281,6 +14289,9 @@ var Orchestrator = class {
     });
   }
 };
+function ownedScope(tasks, coordinator) {
+  return tasks.filter((t) => t.coordinator === coordinator).flatMap((t) => t.writeScope);
+}
 
 // packages/cli/dist/lib/errors.js
 function reportError(err, io) {

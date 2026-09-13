@@ -7,6 +7,7 @@
 import { EventEmitter } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { CapoError } from '../types.js';
 import type {
   AdapterEvent,
   AdapterSession,
@@ -150,23 +151,41 @@ export class Orchestrator {
     await assertAuthorIdentity(this.#config.workspace);
     const base = await headCommit(this.#config.workspace);
 
+    // One worktree per coordinator, not per task. A coordinator is a single
+    // session with a single working directory, so the session is the unit
+    // that can actually be isolated: giving a coordinator that owns two
+    // tasks two worktrees would isolate neither, since it can only ever sit
+    // in one of them. Every coordinator gets one, including a coordinator
+    // with no tasks yet -- the whole point is that nothing but the root ever
+    // runs in the shared workspace.
+    const worktrees = new Map<SessionId, { worktree: string; branch: string }>();
+    for (const coordinator of this.#config.coordinators) {
+      const worktree = this.#worktreeFor(coordinator.id);
+      // Scoped to the run, not just the coordinator. Branches outlive
+      // `.capo/`, so a second run in the same repository (or a retry after a
+      // failed one) would hit "a branch named 'capo/team-a' already exists"
+      // and the orchestrator would die before launching anything.
+      const branch = `capo/${this.#state.get().runId}/${coordinator.id}`;
+      await addWorktree(this.#config.workspace, worktree, branch, base);
+      worktrees.set(coordinator.id, { worktree, branch });
+    }
+
     const taskRecords: TaskRecord[] = [];
     for (const task of this.#config.tasks) {
-      const worktree = join(this.#runDir, 'worktrees', task.id);
-      // Scoped to the run, not just the task. Branches outlive `.capo/`, so a
-      // second run in the same repository (or a retry after a failed one)
-      // would hit "a branch named 'capo/task-a' already exists" and the
-      // orchestrator would die before launching anything.
-      const branch = `capo/${this.#state.get().runId}/${task.id}`;
-      await addWorktree(this.#config.workspace, worktree, branch, base);
+      const owner = worktrees.get(task.coordinator);
+      if (!owner) {
+        throw new CapoError(
+          `task "${task.id}" is assigned to coordinator "${task.coordinator}", which is not declared under coordinators:`,
+        );
+      }
       taskRecords.push({
         id: task.id,
         coordinator: task.coordinator,
         briefPath: task.brief,
         writeScope: task.writeScope,
         state: 'ready',
-        worktree,
-        branch,
+        worktree: owner.worktree,
+        branch: owner.branch,
         baseCommit: base,
       });
     }
@@ -551,22 +570,24 @@ export class Orchestrator {
    * several is genuinely ambiguous under the current per-task worktree model,
    * so it stays in the workspace and says so, rather than silently picking one.
    */
+  /** Where a coordinator's worktree lives. Derived, so resume needs no map. */
+  #worktreeFor(sessionId: SessionId): string {
+    return join(this.#runDir, 'worktrees', sessionId);
+  }
+
   #cwdFor(role: RoleName, sessionId: SessionId): string {
+    // Only the root runs in the shared workspace, and only because it does no
+    // work there: it decomposes, judges and reports. Every coordinator is
+    // isolated, however many tasks it owns.
     if (role !== 'coordinator') return this.#config.workspace;
 
+    // What the run actually recorded wins over the derived path, so a run
+    // started before worktrees were per-coordinator still resumes into the
+    // directory it was really given.
     const owned = Object.values(this.#state.get().tasks).filter(
       (t) => t.coordinator === sessionId,
     );
-    const only = owned.length === 1 ? owned[0] : undefined;
-    if (only?.worktree !== undefined) return only.worktree;
-
-    if (owned.length > 1) {
-      this.#log(
-        `[${sessionId}] owns ${owned.length} tasks, so it runs in the shared workspace ` +
-          `rather than an isolated worktree. Give each coordinator one task for isolation.`,
-      );
-    }
-    return this.#config.workspace;
+    return owned.find((t) => t.worktree !== undefined)?.worktree ?? this.#worktreeFor(sessionId);
   }
 
   async #launchOne(
@@ -924,7 +945,7 @@ export class Orchestrator {
     for (const task of tasks) {
       const sub = this.#submissions.get(task.id);
       if (!sub) continue;
-      const outcome = await acceptResult(this.#config.workspace, task, sub);
+      const outcome = await acceptResult(this.#config.workspace, task, sub, ownedScope(tasks, task.coordinator));
       if (outcome.accepted) {
         accepted.set(task.id, sub);
       } else {
@@ -1025,4 +1046,14 @@ export class Orchestrator {
       checksPassed: report.checksPassed,
     });
   }
+}
+
+/**
+ * Every path the given coordinator owns, across all of its tasks. This is
+ * what a result from that coordinator is checked against -- see the
+ * `allowedScope` note on `acceptResult` for why it is the coordinator and
+ * not the individual task.
+ */
+function ownedScope(tasks: TaskRecord[], coordinator: SessionId): string[] {
+  return tasks.filter((t) => t.coordinator === coordinator).flatMap((t) => t.writeScope);
 }

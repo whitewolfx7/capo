@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { acceptResult, integrate } from './merge.js';
 import { git, headCommit, addWorktree, commitAll } from '../git/repo.js';
 import type { TaskRecord } from '../types.js';
@@ -10,12 +10,12 @@ let repo: string;
 
 /** Tests must not depend on the developer's global git config. */
 const ID = { name: 't', email: 't@t' };
-// The plan's worktree helper puts each worktree at join(repo, '..', 'wt-<id>'),
-// which collapses to the same sibling-of-tmpdir path across every mkdtemp'd
-// repo, and ids repeat across tests (wt-a, wt-b). Track every path created so
-// afterEach can remove them -- otherwise a later test's `addWorktree` fails
-// with "already exists" against a directory an earlier, already-deleted repo
-// left behind.
+// Worktree paths are derived from the mkdtemp'd repo's own name. A plain
+// `wt-<id>` sibling of tmpdir collapses to one path across every test, and
+// ids repeat (wt-a, wt-b), so one interrupted run leaves a directory behind
+// that makes every later run fail with "already exists" -- a failure with
+// nothing to do with the test that reports it. Still tracked and removed in
+// afterEach; the unique name is what stops a crash leaking into the next run.
 let worktrees: string[] = [];
 
 const task = (id: string, scope: string[]): TaskRecord => ({
@@ -35,7 +35,7 @@ async function seed(): Promise<string> {
 
 // Helper: make a commit on a worktree branch touching the given files.
 async function work(id: string, base: string, files: Record<string, string>): Promise<string> {
-  const wt = join(repo, '..', `wt-${id}`);
+  const wt = join(repo, '..', `${basename(repo)}-wt-${id}`);
   worktrees.push(wt);
   await addWorktree(repo, wt, `capo/${id}`, base);
   for (const [f, body] of Object.entries(files)) {
@@ -106,6 +106,30 @@ describe('acceptResult', () => {
 });
 
 describe('integrate', () => {
+  // A coordinator that owns two tasks does both in one worktree, because it
+  // is one session with one working directory. Its second result therefore
+  // carries the first task's files too. Checking that against one task's
+  // scope alone would reject work that never left what the coordinator owns.
+  it('accepts a result carrying a sibling task from the same coordinator, and still rejects another coordinator\'s scope', async () => {
+    const base = await seed();
+    // One worktree, both of this coordinator's tasks done in it.
+    const both = await work('multi', base, {
+      'src/a/one.ts': 'export const one = 1;\n',
+      'src/b/two.ts': 'export const two = 2;\n',
+    });
+    const second = { ...task('second', ['src/b/']), baseCommit: base };
+    const sub = { taskId: 'second', baseCommit: base, resultCommit: both, evidence: 'ok' };
+
+    const owned = await acceptResult(repo, second, sub, ['src/a/', 'src/b/']);
+    expect(owned.accepted).toBe(true);
+
+    // The boundary that still holds: src/a/ belonging to someone else.
+    const foreign = await acceptResult(repo, second, sub, ['src/b/']);
+    expect(foreign.accepted).toBe(false);
+    expect(foreign.violations).toContain('src/a/one.ts');
+  });
+
+
   it('merges two non-overlapping task results and runs the combined check', async () => {
     const base = await seed();
     const a = await work('a', base, { 'src/a/new.ts': 'export const n = 1;\n' });

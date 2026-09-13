@@ -197,10 +197,17 @@ reopen that conversation.
 
 ## Ownership and integration
 
-Every task gets its own git worktree and a declared write scope. A
-coordinator assigned exactly one task runs inside that task's worktree; one
-assigned more than one still runs in the shared workspace instead, because
-isolation for that case isn't built yet.
+Every coordinator runs in its own git worktree, on its own branch, however
+many tasks it owns — a coordinator is one session with one working directory,
+so the session is the unit that can actually be isolated. Only the root runs
+in your workspace, and only because it does no work there: it decomposes,
+judges and reports.
+
+Every task declares a write scope. A result is re-checked against it before
+anything merges, renames included. Where a coordinator owns several tasks
+they share its worktree, so that check is against the union of what that
+coordinator owns; the boundary strictly enforced is the one between
+coordinators, and nothing may write into another's scope.
 
 A coordinator reports a finished task by sending a fenced `# Result:` block
 naming its commit — unprompted, whenever the work is done. CAPO never asks
@@ -262,9 +269,6 @@ Also not done:
 
 Found today, while running both adapters for real:
 
-- A coordinator assigned more than one task still runs in the shared
-  workspace instead of an isolated worktree. Only the one-task-per-coordinator
-  case is isolated.
 - CAPO never spawns a worker itself; coordinators do, using their host's
   native subagent mechanism. `roles/worker.md` and the worker model column in
   `models:` are handed to each coordinator to relay, which means the model

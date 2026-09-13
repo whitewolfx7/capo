@@ -30,6 +30,19 @@ export async function acceptResult(
   repo: string,
   task: TaskRecord,
   sub: ResultSubmission,
+  /**
+   * The paths this result is allowed to touch. Defaults to the task's own
+   * declared scope, which is what a lone task is checked against.
+   *
+   * A coordinator that owns several tasks does all of them in one worktree,
+   * because it is one session with one working directory. Its second result
+   * therefore carries its first task's files too, and checking it against
+   * one task's scope alone would reject work that never left what the
+   * coordinator owns. The boundary that matters -- and the one still
+   * enforced here -- is between coordinators: nothing may write into
+   * another coordinator's scope.
+   */
+  allowedScope: string[] = task.writeScope,
 ): Promise<AcceptanceOutcome> {
   if (sub.baseCommit !== task.baseCommit) {
     return {
@@ -46,7 +59,7 @@ export async function acceptResult(
   }
 
   const paths = await changedPaths(repo, sub.baseCommit, sub.resultCommit);
-  const { ok, violations } = checkScope(paths, task.writeScope);
+  const { ok, violations } = checkScope(paths, allowedScope);
   if (!ok) {
     return { accepted: false, reason: 'result writes outside its approved write scope', violations };
   }

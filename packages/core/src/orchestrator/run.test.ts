@@ -124,6 +124,8 @@ async function harness(
   watchdog: { stallTimeoutMs?: number; stallPollMs?: number } = {},
   /** Extra raw YAML appended to CONFIG_YAML, e.g. a `check_command` line. */
   extraYaml = '',
+  /** Extra `tasks:` entries, spliced in before `limits:` where they belong. */
+  extraTasks = '',
 ): Promise<{
   orch: Orchestrator;
   claude: FakeAdapter;
@@ -163,10 +165,11 @@ async function harness(
   }
 
   const configPath = join(workspace, 'orchestration.yaml');
-  const yaml =
+  let yaml =
     (watchdog.stallTimeoutMs === undefined
       ? CONFIG_YAML
       : `${CONFIG_YAML}\nstall_timeout_ms: ${watchdog.stallTimeoutMs}\n`) + extraYaml;
+  if (extraTasks) yaml = yaml.replace('\nlimits:', `${extraTasks}\nlimits:`);
   await writeFile(configPath, yaml);
   const config = await loadConfig(configPath);
 
@@ -436,12 +439,12 @@ describe('worktree branch naming', () => {
    * hard on an existing branch and the orchestrator dies before launching
    * anything.
    */
-  it('scopes each task branch to the run id', async () => {
+  it('scopes each branch to the run id and the coordinator that works in it', async () => {
     const { orch, state } = await harness();
     await orch.start();
     const runId = state.get().runId;
     for (const task of Object.values(state.get().tasks)) {
-      expect(task.branch, task.id).toBe(`capo/${runId}/${task.id}`);
+      expect(task.branch, task.id).toBe(`capo/${runId}/${task.coordinator}`);
     }
   });
 
@@ -591,6 +594,30 @@ describe('sessions run in their own worktree', () => {
       expect(launch, `a launch for ${task.coordinator}`).toBeDefined();
       expect(launch!.cwd, `${id} runs in its worktree`).toBe(task.worktree);
     }
+  });
+
+  // The multi-task case used to fall back to the shared workspace: a
+  // coordinator with two tasks got no isolation at all, which is exactly the
+  // configuration where isolation matters most. A coordinator is one session
+  // with one working directory, so the coordinator -- not the task -- is the
+  // unit that can be isolated.
+  it('isolates a coordinator that owns several tasks instead of dropping it in the workspace', async () => {
+    const extra = `
+  - id: task-c
+    coordinator: team-a
+    brief: ./tasks/a.md
+    write_scope: [src/c/]
+`;
+    const { orch, claude, state, config } = await harness(undefined, {}, '', extra);
+    await orch.start();
+
+    const owned = Object.values(state.get().tasks).filter((t) => t.coordinator === 'team-a');
+    expect(owned.length).toBe(2);
+
+    const launch = claude.started.find((s) => s.sessionId === 'team-a')!;
+    expect(launch.cwd).not.toBe(config.workspace);
+    // Both tasks live in the one directory that session actually sits in.
+    for (const task of owned) expect(task.worktree).toBe(launch.cwd);
   });
 
   it('keeps the root in the workspace, since it integrates', async () => {

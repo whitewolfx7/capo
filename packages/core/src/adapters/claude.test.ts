@@ -31,7 +31,7 @@ describe('ClaudeAdapter argv', () => {
     expect(argv).toContain('--append-system-prompt');
     expect(argv).toContain('--session-id');
     expect(argv).toContain('--permission-mode');
-    expect(argv).toContain('acceptEdits');
+    expect(argv).toContain('bypassPermissions');
     expect(argv).toContain('-p');
 
     await s.close();
@@ -228,15 +228,19 @@ describe('ClaudeAdapter autonomy', () => {
     return argv[i + 1]!;
   }
 
-  it('acts when autonomous', async () => {
-    expect(await permissionModeFor('autonomous')).toBe('acceptEdits');
+  // Must be a mode that permits Bash, not merely file edits. A full live run
+  // died on exactly that distinction: both coordinators wrote their fix and
+  // then could not run the tests or `git commit`, so neither could ever
+  // produce the result commit a task is finished by.
+  it('grants enough to run commands when autonomous, not just to edit files', async () => {
+    expect(await permissionModeFor('autonomous')).toBe('bypassPermissions');
   });
 
   it('only reads and plans when supervised', async () => {
     expect(await permissionModeFor('supervised')).toBe('plan');
   });
 
-  it('defaults to acting, which is what CAPO has always done', async () => {
-    expect(await permissionModeFor()).toBe('acceptEdits');
+  it('defaults to acting, matching the config default', async () => {
+    expect(await permissionModeFor()).toBe('bypassPermissions');
   });
 });

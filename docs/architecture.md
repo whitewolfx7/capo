@@ -10,7 +10,7 @@ resting only on fake ones:
 - Config loading and validation, rejecting a bad setup before any model call.
 - The run directory, atomic state file, and the Markdown checkpoint format.
 - Git worktrees per task and write-scope enforcement including renames. A
-  coordinator that owns exactly one task runs inside that task's worktree.
+  coordinator runs inside its own worktree, whatever number of tasks it owns.
 - The result protocol and integration: a coordinator reports a finished task
   as a fenced `# Result:` block naming its commit, tasks move
   `ready` -> `running` -> `review` -> `done`/`failed`, and once every task has
@@ -59,9 +59,6 @@ built for.
   matching; its real wire shape for a limit remains an educated guess.
 - Codex has never completed a full orchestration — only single turns and one
   hand-forced platform switch.
-- A coordinator assigned more than one task still runs in the shared
-  workspace rather than an isolated worktree; only the one-task case is
-  isolated.
 - `roles/worker.md` and the worker model column are validated by config and
   handed to each coordinator to relay in its prompt, but CAPO never spawns a
   worker itself — coordinators do, using their host's native subagent

@@ -53,22 +53,24 @@ export const configFileSchema = z
     // stalls. That is the exact bug this setting was added to fix, and a
     // default that reproduces it fixes nothing.
     //
-    // This is not a permissiveness increase for Claude Code, which CAPO has
-    // always launched with --permission-mode acceptEdits. It brings Codex up to
-    // the same footing via --approve-for-me, which keeps the workspace-write
-    // sandbox, rather than --dangerously-bypass-approvals-and-sandbox.
+    // Read `autonomous` as what it says: the session acts without asking.
+    // On Codex that is --approve-for-me, which keeps the workspace-write
+    // sandbox rather than --dangerously-bypass-approvals-and-sandbox. On
+    // Claude Code it is a full permission grant, because the narrower mode
+    // denies every mutating Bash call and a coordinator that cannot run
+    // `git commit` can never finish a task. Both are bounded the same way:
+    // a coordinator only ever runs inside its own git worktree.
     //
-    // What makes that defensible: a coordinator owning one task runs in that
-    // task's own git worktree, not the user's working tree, and every task
-    // declares a write scope that integrate/merge.ts re-checks against each
-    // submitted diff, renames included.
+    // What makes that defensible: every coordinator runs in its own git
+    // worktree rather than your working tree, however many tasks it owns,
+    // and every result is re-checked against the write scope its coordinator
+    // declared before anything merges -- renames included.
     //
-    // Read that precisely. A coordinator owning SEVERAL tasks still runs in
-    // the shared workspace, because a per-task worktree cannot be picked for
-    // it, and integration is not yet wired into a run at all. So today the
-    // real guard is the write scope and your own review of the diff, not
-    // filesystem isolation. Give each coordinator exactly one task if you want
-    // the isolation this argument assumes.
+    // Two limits worth reading precisely. The root runs in the shared
+    // workspace, because it does no work there. And a coordinator's own
+    // tasks share one worktree, so the scope check between two tasks of the
+    // SAME coordinator is their union; the boundary that is strictly
+    // enforced is the one between coordinators.
     //
     // Set `autonomy: supervised` for a dry run: sessions read and plan but do
     // not write.

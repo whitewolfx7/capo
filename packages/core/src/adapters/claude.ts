@@ -7,7 +7,7 @@
  * `__fixtures__/claude-real-toolcall.jsonl` for the captures):
  *   claude -p --output-format stream-json --input-format stream-json
  *          --verbose --session-id <uuid> --model <model>
- *          --append-system-prompt <text> --permission-mode acceptEdits
+ *          --append-system-prompt <text> --permission-mode <see permissionMode>
  *
  * Newline-delimited JSON in on stdin, newline-delimited JSON events out on
  * stdout. `readJsonLines` (the one piece of code this adapter shares with
@@ -55,10 +55,13 @@
  *    `send()`/a second turn on the same process works; assistant `text` and
  *    `tool_use` blocks match the assumed shape exactly, including that each
  *    content block arrives as its own `assistant` line rather than batched;
- *    and — unlike the Codex CLI's approval stall — a live run under
- *    `--permission-mode acceptEdits` in `-p` mode auto-approved both a
- *    `Write` and a `Bash` tool call with no hang and no approval channel
- *    needed.
+ *    and no approval channel is needed in `-p` mode — nothing hangs waiting
+ *    for one, unlike the Codex CLI's approval stall.
+ *
+ *    One claim that used to sit here was wrong, and a later full run caught
+ *    it: `--permission-mode acceptEdits` does NOT auto-approve Bash. It
+ *    approved the `Write` this probe tried and the read-only commands, and
+ *    the conclusion was over-generalised from that. See `permissionMode`.
  */
 import { type ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -504,14 +507,27 @@ export class ClaudeAdapter implements PlatformAdapter {
  * Maps CAPO's autonomy level onto a Claude Code permission mode.
  *
  * A headless session has nobody to ask, so the choice is really between
- * "allowed to act" and "dry run". `acceptEdits` is what CAPO has always used
- * and what a real run needs; a live run confirmed it auto-approves Write and
- * Bash calls with no hang. `plan` lets a supervised run read and reason
- * without writing anything.
+ * "allowed to act" and "dry run".
  *
- * Defaults to autonomous when unset so an adapter constructed without the
- * field behaves exactly as CAPO always has.
+ * `acceptEdits` was used here until a full run proved it insufficient, and
+ * the comment this replaces claimed a live run had confirmed it auto-approves
+ * Bash. It does not. It accepts file edits and denies every mutating Bash
+ * call with "This command requires approval"; the earlier probe had only run
+ * read-only commands, which do go through. The consequence was total: a
+ * coordinator could write the fix but could not run the tests or
+ * `git commit`, so it could never produce the result commit the entire
+ * result protocol is built on. Both coordinators in that run reported the
+ * same blocker and the run could not finish.
+ *
+ * So autonomous maps to a full grant, and that is worth stating plainly
+ * rather than burying: the session may run any command. What makes it
+ * defensible is where it runs. Every coordinator is confined to its own git
+ * worktree, and `autonomy: autonomous` is the setting whose whole meaning is
+ * "act without asking". A user who does not want that has `supervised`,
+ * which maps to `plan`: read and reason, write nothing.
+ *
+ * Defaults to autonomous when unset, matching the config default.
  */
 function permissionMode(level: AutonomyLevel | undefined): string {
-  return (level ?? 'autonomous') === 'supervised' ? 'plan' : 'acceptEdits';
+  return (level ?? 'autonomous') === 'supervised' ? 'plan' : 'bypassPermissions';
 }

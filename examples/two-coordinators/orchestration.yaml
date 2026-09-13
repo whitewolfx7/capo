@@ -61,6 +61,13 @@ autonomy: autonomous
 # own with nothing further to check.
 check_command: ["node", "--test", "src/component-a/add.test.mjs", "src/component-b/multiply.test.mjs"]
 
+# Run once in every fresh worktree -- every coordinator worktree right after
+# it is created, and the integration worktree after all merges and before
+# check_command -- because a fresh git worktree has no installed
+# dependencies. argv, not a shell string. Optional; omitted (the default)
+# means nothing runs.
+# setup_command: ["npm", "ci"]
+
 transcripts: true
 
 # How long a live session can emit zero events before CAPO marks it

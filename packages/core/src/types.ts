@@ -76,6 +76,15 @@ export interface CapoConfig {
    * combined check to run.
    */
   checkCommand: string[];
+  /**
+   * Run once in every coordinator worktree right after it is created, and
+   * once in the integration worktree after all merges and before
+   * `checkCommand` -- e.g. `["npm", "ci"]`. Passed to `execFile` as argv,
+   * never a shell string. A fresh git worktree has no installed
+   * dependencies, so without this a real project's `checkCommand` (and any
+   * work a coordinator does) has nothing to run against. Defaults to `[]`.
+   */
+  setupCommand: string[];
 }
 
 export type AutonomyLevel = 'supervised' | 'autonomous';

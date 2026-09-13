@@ -4,9 +4,11 @@
  * relaunches it on the other platform. This is the state machine described
  * in docs/architecture.md, "The rule".
  */
+import { execFile as execFileCb } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { CapoError } from '../types.js';
 import type {
   AdapterEvent,
@@ -39,6 +41,8 @@ import { headCommit, addWorktree, assertAuthorIdentity, describeWorktree } from 
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint, MAX_RESULT_NUDGES, renderResultNudge } from './prompt.js';
 import { extractResult, parseResult } from './result.js';
 import { acceptResult, integrate, type IntegrationReport, type ResultSubmission } from '../integrate/merge.js';
+
+const execFile = promisify(execFileCb);
 
 const CHECKPOINT_TIMEOUT_MS = 60_000;
 
@@ -180,6 +184,7 @@ export class Orchestrator {
       // and the orchestrator would die before launching anything.
       const branch = `capo/${this.#state.get().runId}/${coordinator.id}`;
       await addWorktree(this.#config.workspace, worktree, branch, base);
+      await this.#runSetup(worktree);
       worktrees.set(coordinator.id, { worktree, branch });
     }
 
@@ -623,6 +628,27 @@ export class Orchestrator {
   /** Where a coordinator's worktree lives. Derived, so resume needs no map. */
   #worktreeFor(sessionId: SessionId): string {
     return join(this.#runDir, 'worktrees', sessionId);
+  }
+
+  /**
+   * Runs `config.setupCommand` once in a freshly created worktree, before
+   * anything else happens in it. A fresh git worktree has no node_modules,
+   * no build output -- nothing a real project needs to run its tests, so
+   * without this every coordinator (and later, `checkCommand`) starts from
+   * an environment that cannot actually work. No-op when unset.
+   */
+  async #runSetup(cwd: string): Promise<void> {
+    const [cmd, ...args] = this.#config.setupCommand;
+    if (cmd === undefined) return;
+    try {
+      await execFile(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new CapoError(
+        `setup_command failed in ${cwd}: ${detail}`,
+        'fix setup_command in the config, or run it by hand in that worktree and resume',
+      );
+    }
   }
 
   #cwdFor(role: RoleName, sessionId: SessionId): string {
@@ -1069,6 +1095,7 @@ export class Orchestrator {
         tasks,
         submissions: accepted,
         checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : undefined,
+        setupCommand: this.#config.setupCommand.length > 0 ? this.#config.setupCommand : undefined,
       });
     } catch (err) {
       // Integration never got far enough to judge any individual task, so

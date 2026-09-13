@@ -81,6 +81,12 @@ export const configFileSchema = z
     // cannot guess how a project verifies itself. An empty array (the
     // default) means integration accepts a clean merge on its own.
     check_command: z.array(z.string()).default([]),
+    // Run once in every coordinator worktree right after it is created, and
+    // once in the integration worktree after all merges and before
+    // check_command -- e.g. ["npm", "ci"]. A fresh git worktree has no
+    // node_modules, no build output, nothing a real project needs to run its
+    // tests. argv, not a shell string.
+    setup_command: z.array(z.string()).default([]),
     limits: z
       .object({
         max_workers_per_coordinator: z.number().int().positive().default(2),

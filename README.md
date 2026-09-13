@@ -108,7 +108,7 @@ coordinators:
   - id: team-a
   - id: team-b
 
-tasks:             # optional: leave empty and the root decomposes the objective
+tasks:             # at least one; each names its coordinator and write scope
   - id: component-a
     coordinator: team-a
     brief: ./tasks/component-a.md
@@ -117,6 +117,8 @@ tasks:             # optional: leave empty and the root decomposes the objective
     coordinator: team-b
     brief: ./tasks/component-b.md
     write_scope: [src/component-b/]
+
+setup_command: ["npm", "ci"]   # optional; runs in every fresh worktree
 
 transcripts: true  # default; writes a live log per session you can tail -f
 
@@ -219,6 +221,9 @@ is re-checked against that task's declared write scope (including files moved
 out of it by a rename), accepted results are merged one at a time into an
 integration worktree, and `check_command` runs over the combined tree. A
 rejected scope, a conflict, or a failing check fails that task and the run.
+If `setup_command` is set it runs in each coordinator worktree at creation
+and in the integration worktree before the check, because a fresh worktree
+has no installed dependencies.
 
 **A coordinator saying it finished does not make a task done.** Its report is
 a claim; the scope check and the merge are what settle it. The root does not

@@ -70,6 +70,7 @@ export async function loadConfig(configPath: string): Promise<CapoConfig> {
     stallTimeoutMs: file.stall_timeout_ms,
     autonomy: file.autonomy,
     checkCommand: file.check_command,
+    setupCommand: file.setup_command,
     limits: { maxWorkersPerCoordinator: file.limits.max_workers_per_coordinator },
   };
 
@@ -159,6 +160,13 @@ function validateCoordinators(file: ConfigFile): Set<string> {
 }
 
 function validateTasks(file: ConfigFile, coordinatorIds: Set<string>): void {
+  if (file.tasks.length === 0) {
+    throw new CapoError(
+      'v0.1 requires at least one task under tasks:',
+      'Declare each unit of work with an id, a coordinator, a brief, and a write_scope. Root-driven decomposition is not implemented.',
+    );
+  }
+
   const seenTaskIds = new Set<string>();
   for (const t of file.tasks) {
     if (seenTaskIds.has(t.id)) {

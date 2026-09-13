@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { acceptResult, integrate } from './merge.js';
@@ -200,6 +200,36 @@ describe('integrate', () => {
     });
     expect(rep.checksPassed).toBe(false);
     expect(rep.checkOutput).toContain('2 failing');
+  });
+
+  it('runs setup_command in the integration worktree before check_command', async () => {
+    const base = await seed();
+    const a = await work('a', base, { 'src/a/new.ts': 'export const n = 1;\n' });
+    const rep = await integrate({
+      identity: ID,
+      repo, runDir: join(repo, '.capo/runs/r1'), baseCommit: base,
+      tasks: [{ ...task('a', ['src/a/']), baseCommit: base }],
+      submissions: new Map([['a', { taskId: 'a', baseCommit: base, resultCommit: a, evidence: 'ok' }]]),
+      setupCommand: ['node', '-e', "require('fs').writeFileSync('setup.marker','1')"],
+    });
+    expect(rep.merged).toEqual(['a']);
+    const marker = await readFile(join(repo, '.capo/runs/r1/integration/setup.marker'), 'utf8');
+    expect(marker).toBe('1');
+  });
+
+  it('fails the check with setup_command failed and skips check_command when setup_command fails', async () => {
+    const base = await seed();
+    const a = await work('a', base, { 'src/a/new.ts': 'export const n = 1;\n' });
+    const rep = await integrate({
+      identity: ID,
+      repo, runDir: join(repo, '.capo/runs/r1'), baseCommit: base,
+      tasks: [{ ...task('a', ['src/a/']), baseCommit: base }],
+      submissions: new Map([['a', { taskId: 'a', baseCommit: base, resultCommit: a, evidence: 'ok' }]]),
+      setupCommand: ['node', '-e', 'process.exit(2)'],
+      checkCommand: ['node', '-e', 'process.exit(0)'],
+    });
+    expect(rep.checksPassed).toBe(false);
+    expect(rep.checkOutput).toMatch(/^setup_command failed/);
   });
 
   it('skips a task with no submission rather than failing the run', async () => {

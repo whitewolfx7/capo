@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -812,6 +812,36 @@ describe('sessions run in their own worktree', () => {
     const coordinators = claude.started.filter((s) => s.role === 'coordinator');
     expect(coordinators.length).toBeGreaterThan(1);
     expect(new Set(coordinators.map((s) => s.cwd)).size).toBe(coordinators.length);
+  });
+});
+
+describe('setup_command', () => {
+  // A fresh git worktree has no node_modules, no build output -- nothing a
+  // real project needs to run its tests. setup_command runs once in every
+  // coordinator worktree right after it is created, so real work is
+  // possible before any session is ever launched into it.
+  it('runs setup_command in every coordinator worktree right after it is created', async () => {
+    const { orch, state } = await harness(
+      undefined,
+      {},
+      `\nsetup_command: ["node", "-e", "require('fs').writeFileSync('setup.marker', process.cwd())"]\n`,
+    );
+    await orch.start();
+    for (const task of Object.values(state.get().tasks)) {
+      // process.cwd() inside setup_command can resolve through a symlink
+      // (e.g. macOS's /tmp -> /private/tmp) even though task.worktree does
+      // not, so only the marker's existence is asserted, not its content.
+      await expect(readFile(join(task.worktree!, 'setup.marker'), 'utf8')).resolves.not.toBeNull();
+    }
+  });
+
+  it('rejects start() when setup_command fails', async () => {
+    const { orch } = await harness(
+      undefined,
+      {},
+      '\nsetup_command: ["node", "-e", "process.exit(3)"]\n',
+    );
+    await expect(orch.start()).rejects.toThrow(/setup_command failed/);
   });
 });
 

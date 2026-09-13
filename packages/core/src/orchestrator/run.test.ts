@@ -823,18 +823,42 @@ describe('result submission', () => {
     await orch.start();
     const task = Object.values(state.get().tasks)[0]!;
 
-    // Well-formed heading, everything else blank: parseResult must not throw,
-    // and the lenient read still moves the task to review -- acceptResult is
-    // what actually catches an unusable (empty) commit sha, at integration time.
-    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    // Well-formed heading, everything else blank: parseResult must not throw.
+    // The empty commit fails the git-sha check, so the result is ignored and
+    // the task stays running rather than moving to review.
     claude.emit(task.coordinator, { kind: 'text', text: '```markdown\n# Result: \ntask:\n```' });
-    await received;
-    expect(state.get().tasks[task.id]!.state).toBe('review');
+    await settle();
+    expect(state.get().tasks[task.id]!.state).toBe('running');
 
     // Plain prose with no fenced block at all must never be mistaken for a result.
     claude.emit(task.coordinator, { kind: 'text', text: 'still working on it' });
     await settle();
+    expect(state.get().tasks[task.id]!.state).toBe('running');
+
+    // The pump itself must still be alive after two ignored blocks: a
+    // well-formed result afterwards still lands normally.
+    const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit(task.coordinator, { kind: 'text', text: resultBlock(task.id, sha) });
+    await received;
     expect(state.get().tasks[task.id]!.state).toBe('review');
+  });
+
+  it('ignores a result block whose commit is not a git sha', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const task = Object.values(state.get().tasks)[0]!;
+
+    // A coordinator that echoes the protocol template verbatim (placeholder
+    // and all) must never move its task to review -- Finding 8.
+    claude.emit(task.coordinator, {
+      kind: 'text',
+      text: resultBlock(task.id, '<the commit sha in your task worktree>', 'none'),
+    });
+    await settle();
+
+    expect(state.get().tasks[task.id]!.state).toBe('running');
+    expect(state.get().tasks[task.id]!.resultCommit).toBeUndefined();
   });
 });
 

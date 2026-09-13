@@ -941,6 +941,15 @@ export class Orchestrator {
       return;
     }
 
+    // A coordinator that echoes the protocol template verbatim (placeholder
+    // commit and all) must never move its task to review: the check runs
+    // before task resolution so a bogus commit is rejected regardless of
+    // which task it claims to be for.
+    if (!/^[0-9a-f]{7,40}$/i.test(raw.resultCommit)) {
+      this.#log(`[${sessionId}] result ignored: commit "${raw.resultCommit}" is not a git sha`);
+      return;
+    }
+
     const state = this.#state.get();
     const owned = Object.values(state.tasks).filter((t) => t.coordinator === sessionId);
     const task = owned.length === 1 ? owned[0] : owned.find((t) => t.id === raw.taskId);

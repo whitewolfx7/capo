@@ -17,7 +17,7 @@ import type { RunState } from '@capo/core';
 import type { Io } from '../io.js';
 import { reportError } from '../lib/errors.js';
 import { isPidAlive, readPidFile } from '../lib/pid.js';
-import { latestRunId } from '../lib/run-locate.js';
+import { latestRunId, locateWorkspace } from '../lib/run-locate.js';
 
 export interface StatusOpts {
   runId?: string;
@@ -26,9 +26,9 @@ export interface StatusOpts {
 }
 
 export async function runStatus(opts: StatusOpts, io: Io): Promise<number> {
-  const workspace = opts.workspace !== undefined ? resolve(opts.workspace) : process.cwd();
-
   try {
+    const workspace =
+      opts.workspace !== undefined ? resolve(opts.workspace) : await locateWorkspace(process.cwd(), opts.runId);
     const runId = opts.runId ?? (await latestRunId(workspace));
     const dir = runDir(workspace, runId);
     const state = await readState(dir);

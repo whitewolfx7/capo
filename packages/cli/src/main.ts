@@ -27,8 +27,8 @@ const HELP_TEXT = `capo ${VERSION} -- run one AI agent team across Claude Code a
 Usage:
   capo run --config <path> [--foreground] [--start-on <platform>]
   capo status [<run-id>] [--json] [--workspace <dir>]
-  capo switch <run-id> [--to <platform>]
-  capo resume <run-id>
+  capo switch <run-id> [--to <platform>] [--workspace <dir>]
+  capo resume <run-id> [--workspace <dir>]
   capo doctor [--json]
   capo --version
   capo --help
@@ -132,14 +132,14 @@ async function dispatchStatus(rest: string[], io: Io): Promise<number> {
 }
 
 async function dispatchSwitch(rest: string[], io: Io): Promise<number> {
-  let values: { to?: string };
+  let values: { to?: string; workspace?: string };
   let positionals: string[];
   try {
     ({ values, positionals } = parseArgs({
       args: rest,
       allowPositionals: true,
       strict: true,
-      options: { to: { type: 'string' } },
+      options: { to: { type: 'string' }, workspace: { type: 'string' } },
     }));
   } catch (err) {
     io.err(usageError('switch', err));
@@ -152,13 +152,19 @@ async function dispatchSwitch(rest: string[], io: Io): Promise<number> {
     return 2;
   }
 
-  return runSwitch({ runId, to: values.to }, io);
+  return runSwitch({ runId, to: values.to, workspace: values.workspace }, io);
 }
 
 async function dispatchResume(rest: string[], io: Io): Promise<number> {
+  let values: { workspace?: string };
   let positionals: string[];
   try {
-    ({ positionals } = parseArgs({ args: rest, allowPositionals: true, strict: true, options: {} }));
+    ({ values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      strict: true,
+      options: { workspace: { type: 'string' } },
+    }));
   } catch (err) {
     io.err(usageError('resume', err));
     return 2;
@@ -170,7 +176,7 @@ async function dispatchResume(rest: string[], io: Io): Promise<number> {
     return 2;
   }
 
-  return runResume({ runId }, io);
+  return runResume({ runId, workspace: values.workspace }, io);
 }
 
 async function dispatchDoctor(rest: string[], io: Io): Promise<number> {

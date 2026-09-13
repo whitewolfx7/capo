@@ -1,5 +1,5 @@
 /**
- * `capo resume <run-id>`
+ * `capo resume <run-id> [--workspace <dir>]`
  *
  * If the run's orchestrator process is still alive, this behaves like
  * `capo switch` with no explicit target: write `control.json`, signal
@@ -13,23 +13,28 @@
  * session had done, and relaunching without them would discard exactly the
  * work they were written to preserve. It then blocks like `run --foreground`.
  */
+import { resolve } from 'node:path';
 import { readState, runDir } from '@capo/core';
 import type { Io } from '../io.js';
 import { writeControlRequest } from '../lib/control.js';
 import { reportError } from '../lib/errors.js';
 import { reopenRun } from '../lib/orchestrator-setup.js';
 import { isPidAlive, readPidFile, writePidFile } from '../lib/pid.js';
+import { locateWorkspace } from '../lib/run-locate.js';
 import { blockUntilStopped } from '../lib/signals.js';
 
 export interface ResumeOpts {
   runId: string;
+  workspace?: string;
 }
 
 export async function runResume(opts: ResumeOpts, io: Io): Promise<number> {
-  const workspace = process.cwd();
-  const dir = runDir(workspace, opts.runId);
+  let dir: string;
 
   try {
+    const workspace =
+      opts.workspace !== undefined ? resolve(opts.workspace) : await locateWorkspace(process.cwd(), opts.runId);
+    dir = runDir(workspace, opts.runId);
     await readState(dir);
   } catch (err) {
     return reportError(err, io);

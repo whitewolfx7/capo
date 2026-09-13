@@ -147,7 +147,11 @@ function execCapture(
  * write nothing, to any file, ever. Not "unchanged" — the README has always
  * described supervised this way, and the root (always launched supervised,
  * see `orchestrator/run.ts#launchOne`) relies on it being mechanically true
- * rather than a matter of the session following instructions.
+ * rather than a matter of the session following instructions. Its placement
+ * ahead of a `resume` subcommand was verified the same way as
+ * `--approve-for-me`'s below: `codex exec --sandbox read-only resume --help`
+ * and `codex exec --sandbox read-only --approve-for-me resume --help` both
+ * parse correctly on codex-cli 0.154.0.
  *
  * "autonomous" adds `--approve-for-me`, which (per `codex exec --help`)
  * "route[s] approval requests through automatic review using the

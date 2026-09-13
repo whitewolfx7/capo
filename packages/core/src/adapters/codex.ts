@@ -143,11 +143,11 @@ function execCapture(
  * `undefined` (an adapter constructed against an older `StartSessionOptions`,
  * or a caller that never set it) is treated the same as "supervised".
  *
- * "supervised" adds nothing: whatever `codex exec` and the user's own
- * `~/.codex/config.toml` would otherwise do, unchanged. This is the config
- * default (`autonomy: 'supervised'` in `orchestration.yaml`), deliberately:
- * CAPO does not widen what a session can do on a real repository unless the
- * person running it asks for that.
+ * "supervised" adds `--sandbox read-only`: the session can read and plan but
+ * write nothing, to any file, ever. Not "unchanged" — the README has always
+ * described supervised this way, and the root (always launched supervised,
+ * see `orchestrator/run.ts#launchOne`) relies on it being mechanically true
+ * rather than a matter of the session following instructions.
  *
  * "autonomous" adds `--approve-for-me`, which (per `codex exec --help`)
  * "route[s] approval requests through automatic review using the
@@ -170,7 +170,9 @@ function autonomyFlags(level: AutonomyLevel | undefined): string[] {
     case 'autonomous':
       return ['--approve-for-me'];
     case 'supervised':
-      return [];
+      // Read and plan, write nothing. Not "unchanged": the README has
+      // always described supervised this way, and the root relies on it.
+      return ['--sandbox', 'read-only'];
   }
 }
 

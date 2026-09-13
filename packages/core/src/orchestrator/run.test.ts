@@ -234,6 +234,16 @@ describe('Orchestrator', () => {
     expect(claude.started.find((s) => s.sessionId === 'team-a')!.model).toBe('sonnet');
   });
 
+  it('launches the root supervised (read-only) and coordinators with the configured autonomy', async () => {
+    const { orch, claude } = await harness();
+    await orch.start();
+    const starts = claude.started;
+    const root = starts.find((s) => s.role === 'root');
+    const coord = starts.find((s) => s.role === 'coordinator');
+    expect(root?.autonomy).toBe('supervised');
+    expect(coord?.autonomy).toBe('autonomous');
+  });
+
   it('on a usage-limit event, checkpoints every session and relaunches all of them on the other platform', async () => {
     const { orch, claude, codex, dir } = await harness();
     await orch.start();

@@ -621,7 +621,10 @@ export class Orchestrator {
       cwd: this.#cwdFor(role, sessionId),
       systemPrompt,
       prompt: checkpoint ? 'Resume your work from your checkpoint, above.' : 'Begin work toward the objective, above.',
-      autonomy: this.#config.autonomy,
+      // The root sits in the shared workspace. Twice now a live root has written
+      // there (once itself, once through spawned subagents) despite instructions
+      // not to. Instructions are not a boundary; a read-only launch is.
+      autonomy: role === 'root' ? 'supervised' : this.#config.autonomy,
     };
 
     if (this.#config.transcripts) {

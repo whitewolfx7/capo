@@ -705,7 +705,12 @@ describe('stall watchdog', () => {
    * goes quiet — for any reason — should become visible without CAPO taking
    * any action on its own.
    */
-  async function waitFor(check: () => boolean, ms = 2000): Promise<void> {
+  // Generous on purpose. The conditions below normally land within ~100ms,
+  // but every state update fsyncs, and on a loaded CI runner with the whole
+  // suite's files in parallel workers a single write has taken over 2s
+  // (Node 20 job, 2026-09-13). The bound only decides how long a genuine
+  // failure takes to report; it must never be what fails the test.
+  async function waitFor(check: () => boolean, ms = 15_000): Promise<void> {
     const start = Date.now();
     while (!check()) {
       if (Date.now() - start > ms) throw new Error('timed out waiting for condition');

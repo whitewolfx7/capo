@@ -1113,6 +1113,105 @@ describe('integration', () => {
     expect(state.get().status).toBe('done');
     for (const task of tasks) expect(state.get().tasks[task.id]!.state).toBe('done');
   });
+
+  /**
+   * A well-formed checkpoint reply for `sessionId`, fenced the way a real
+   * session's answer to `CHECKPOINT_REQUEST` is expected to look.
+   */
+  function checkpointBlockFor(opts: StartSessionOptions, platform: string): string {
+    return (
+      '```markdown\n' +
+      renderCheckpoint({
+        sessionId: opts.sessionId,
+        runId: 'test-run',
+        role: opts.role,
+        platform,
+        written: new Date().toISOString(),
+        baseCommit: 'deadbeef',
+        objective: `fake objective for ${opts.sessionId}`,
+        decisions: [],
+        done: [],
+        inProgress: [],
+        remaining: [],
+        blockers: [],
+      }) +
+      '\n```'
+    );
+  }
+
+  /**
+   * Answers a checkpoint request for an armed session by first emitting a
+   * result block for the task it owns, then a normal checkpoint reply --
+   * both pushed by the same `send()` call, so the pump (which awaits each
+   * event fully before pulling the next, see `#pump`) processes the result
+   * strictly before the checkpoint settles the request. This is how a live
+   * run reproduced the bug this file is testing for: both coordinators
+   * reported their result while a hand-forced switch was checkpointing them,
+   * i.e. while `#switching` was still true. A session with nothing armed
+   * (the root, here) answers exactly like `ArmedFakeAdapter`.
+   */
+  class ResultOnCheckpointAdapter extends FakeAdapter {
+    #results = new Map<SessionId, string>();
+
+    /**
+     * Arms `sessionId` so that whenever it is next asked for a checkpoint,
+     * it emits `resultText` first. Deliberately just records the text here
+     * rather than deciding anything at `start()` time: a test arms this
+     * *after* `orch.start()` has already launched every session, so the
+     * decision has to be made lazily, when `send()` (the checkpoint
+     * request) actually arrives.
+     */
+    armResultBeforeCheckpoint(sessionId: SessionId, resultText: string): void {
+      this.#results.set(sessionId, resultText);
+    }
+
+    override async start(opts: StartSessionOptions): Promise<AdapterSession> {
+      const session = await super.start(opts);
+      const adapter = this;
+      return {
+        ...session,
+        async send(text: string): Promise<void> {
+          adapter.sent.push({ sessionId: opts.sessionId, text });
+          const resultText = adapter.#results.get(opts.sessionId);
+          if (resultText !== undefined) {
+            adapter.emit(opts.sessionId, { kind: 'text', text: resultText });
+          }
+          adapter.emit(opts.sessionId, { kind: 'text', text: checkpointBlockFor(opts, adapter.id) });
+          adapter.emit(opts.sessionId, { kind: 'turn-end' });
+        },
+      };
+    }
+  }
+
+  it('re-checks integration once a hand-forced switch lands, even if nothing reports again afterward', async () => {
+    const resultAdapter = new ResultOnCheckpointAdapter('claude');
+    const { orch, state } = await harness((id) =>
+      id === 'claude' ? resultAdapter : new ArmedFakeAdapter(id),
+    );
+    await orch.start();
+    const tasks = Object.values(state.get().tasks);
+
+    // Both coordinators' results are armed to arrive mid-checkpoint request,
+    // while `#switching` is true -- exactly when `#maybeIntegrate` (called
+    // from `#handleResult`) bails out early by design (see its own
+    // docstring). Nothing else re-checks integration once the switch lands,
+    // unless a relaunched session happens to report its result again -- the
+    // gap this test guards against.
+    for (const task of tasks) {
+      const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+      resultAdapter.armResultBeforeCheckpoint(task.coordinator, resultBlock(task.id, sha));
+    }
+
+    const finished = withDeadline(once(orch.events, 'integration-finished'), 'integration-finished', 8000);
+    await orch.requestSwitch('codex', 'user-switch');
+    // No further result is ever emitted after this point -- integration must
+    // fire on its own once the switch has landed.
+    const [report] = (await finished) as [{ status: string }];
+
+    expect(report.status).toBe('done');
+    expect(state.get().status).toBe('done');
+    for (const task of tasks) expect(state.get().tasks[task.id]!.state).toBe('done');
+  });
   // A live Codex run whose every session failed on an unsupported model kept
   // reporting "running" forever: nothing watched for the case where there is
   // no longer anyone left who could finish the work.

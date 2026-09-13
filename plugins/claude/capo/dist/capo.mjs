@@ -29360,6 +29360,7 @@ var Orchestrator = class {
       await this.#doSwitch(to, reason);
     } finally {
       this.#switching = false;
+      void this.#maybeIntegrate();
     }
   }
   /**

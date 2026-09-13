@@ -116,10 +116,21 @@ same CLI and the same `.capo/` directory on disk.
 
 ## Roles
 
-- **Root**: owns the objective, breaks it into tasks, assigns them to
-  coordinators, integrates results. One root per run.
-- **Coordinators**: one platform session each. Subdivide their tasks and spawn
-  native subagents for the pieces. Report results and blockers to the root.
+- **Root**: owns the objective. Launched read-only in the shared workspace —
+  Claude Code plan mode, Codex's read-only sandbox — so it cannot write
+  there. It does not decompose the objective into tasks or assign them: CAPO
+  builds the task table from the run's config before any session launches
+  and hands each coordinator its own brief and write scope directly. The
+  root reads that table, watches coordinator transcripts and `STATUS.md`,
+  and judges in writing whether the reported work meets the objective. It
+  does not write code and does not integrate — CAPO does that mechanically.
+  One root per run.
+- **Coordinators**: one platform session each, owning whichever tasks were
+  assigned to it in its own git worktree. Subdivide their tasks and spawn
+  native subagents for the pieces. Report a finished task to CAPO, not to
+  the root, as a fenced `# Result:` block naming its commit; CAPO re-checks
+  the commit against the task's declared write scope, merges what it
+  accepts, and runs the configured check command.
 - **Workers**: the platform's native subagents (Claude Code Agent tool, Codex
   subagents). They are not tracked as separate sessions by CAPO; their output
   comes back through their coordinator.

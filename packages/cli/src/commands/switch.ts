@@ -1,30 +1,47 @@
 /**
- * `capo switch <run-id> [--to <platform>]`
+ * `capo switch <run-id> [--to <platform>] [--workspace <dir>]`
  *
  * A live orchestrator is required: this only signals one, it never starts
  * one. Writes the request to `control.json` then sends `SIGUSR2` to the
  * recorded pid; the orchestrator's own signal handler (installed in
  * `commands/run.ts`) does the actual switch.
+ *
+ * A run that already finished has nothing left to switch: there is no live
+ * orchestrator to signal, and treating it like a stalled run ("resume it
+ * instead") would send the person chasing a process that was never coming
+ * back.
  */
+import { resolve } from 'node:path';
 import { readState, runDir } from '@capo/core';
+import type { RunState } from '@capo/core';
 import type { Io } from '../io.js';
 import { writeControlRequest } from '../lib/control.js';
 import { reportError } from '../lib/errors.js';
 import { isPidAlive, readPidFile } from '../lib/pid.js';
+import { locateWorkspace } from '../lib/run-locate.js';
 
 export interface SwitchOpts {
   runId: string;
   to?: string;
+  workspace?: string;
 }
 
 export async function runSwitch(opts: SwitchOpts, io: Io): Promise<number> {
-  const workspace = process.cwd();
-  const dir = runDir(workspace, opts.runId);
+  let dir: string;
+  let state: RunState;
 
   try {
-    await readState(dir);
+    const workspace =
+      opts.workspace !== undefined ? resolve(opts.workspace) : await locateWorkspace(process.cwd(), opts.runId);
+    dir = runDir(workspace, opts.runId);
+    state = await readState(dir);
   } catch (err) {
     return reportError(err, io);
+  }
+
+  if (state.status === 'done' || state.status === 'failed') {
+    io.err(`run ${opts.runId} is already ${state.status}; nothing to switch`);
+    return 1;
   }
 
   const pid = await readPidFile(dir);

@@ -63,6 +63,15 @@ describe('StateStore', () => {
   it('open() on a missing directory throws a CapoError with a hint', async () => {
     await expect(StateStore.open(join(dir, 'nope'))).rejects.toThrow(/no run found/i);
   });
+
+  it('flush() resolves after every queued update has been written and leaves no tmp files', async () => {
+    const store = await StateStore.create(dir, base());
+    void store.update((d) => { d.pauseCount = 1; });
+    void store.update((d) => { d.pauseCount = 2; });
+    await store.flush();
+    expect((await readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    expect(JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')).pauseCount).toBe(2);
+  });
 });
 
 describe('allocateRunId', () => {

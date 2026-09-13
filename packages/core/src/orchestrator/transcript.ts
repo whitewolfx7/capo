@@ -63,7 +63,12 @@ export function renderEvent(event: AdapterEvent): string | undefined {
         '',
       ].join('\n');
     case 'error':
-      return `\n> **error**${event.retryable ? ' (retryable)' : ''}: ${event.message}\n`;
+      // A retryable error is CAPO's own recoverable hiccup (e.g. a clamped
+      // hook timeout) rather than something the run failed on, so it reads
+      // as a warning rather than an error in the transcript.
+      return event.retryable
+        ? `\n> _warning_: ${event.message}\n`
+        : `\n> **error**: ${event.message}\n`;
     case 'turn-end':
       return '\n---\n';
     case 'exit':

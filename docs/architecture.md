@@ -15,7 +15,10 @@ resting only on fake ones:
   only because it does no work there. Where a coordinator owns several tasks
   they share its worktree, so its results are checked against the union of
   what that coordinator owns — the boundary strictly enforced is the one
-  between coordinators.
+  between coordinators. The root is launched read-only on both platforms —
+  Claude Code plan mode, Codex's `--sandbox read-only` — regardless of the
+  run's configured `autonomy`, so a root that tries to edit, commit, or spawn
+  a writing subagent fails mechanically instead of merely being told not to.
 - The result protocol and integration: a coordinator reports a finished task
   as a fenced `# Result:` block naming its commit, tasks move
   `ready` -> `running` -> `review` -> `done`/`failed`, and once every task has
@@ -40,6 +43,18 @@ resting only on fake ones:
   stall watchdog marks a session `stalled` — in state, `STATUS.md`, and its
   transcript — once it goes quiet past `stallTimeoutMs`. That is the only
   thing it does: it does not act on a stall or answer it.
+- Checkpoints are re-requested once at turn-end if a session's first reply
+  carried none, and always augmented with facts read straight from git —
+  commits since base and uncommitted paths in that session's worktree — which
+  a session cannot misreport. On a usage-limit pause no session is asked at
+  all: every checkpoint is synthesized from those git facts, since a capped
+  session may not be able to answer. A coordinator whose turn ends with an
+  open task and no `# Result:` block is nudged, up to `MAX_RESULT_NUDGES`
+  (3) times, then left to the stall watchdog. A result block whose commit
+  isn't a git sha is ignored rather than resolving the task it names, and
+  events from a session that has already been closed — including a stale
+  usage-limit arriving from the platform that just lost activity — are
+  ignored so they cannot re-trigger a switch or park the run.
 - The CLI: `run`, `status`, `switch`, `resume`, `doctor`.
 - Both plugins install into their host. Their built bundles
   (`plugins/*/capo/dist/capo.mjs`) are committed to the repository rather
@@ -101,10 +116,21 @@ same CLI and the same `.capo/` directory on disk.
 
 ## Roles
 
-- **Root**: owns the objective, breaks it into tasks, assigns them to
-  coordinators, integrates results. One root per run.
-- **Coordinators**: one platform session each. Subdivide their tasks and spawn
-  native subagents for the pieces. Report results and blockers to the root.
+- **Root**: owns the objective. Launched read-only in the shared workspace —
+  Claude Code plan mode, Codex's read-only sandbox — so it cannot write
+  there. It does not decompose the objective into tasks or assign them: CAPO
+  builds the task table from the run's config before any session launches
+  and hands each coordinator its own brief and write scope directly. The
+  root reads that table, watches coordinator transcripts and `STATUS.md`,
+  and judges in writing whether the reported work meets the objective. It
+  does not write code and does not integrate — CAPO does that mechanically.
+  One root per run.
+- **Coordinators**: one platform session each, owning whichever tasks were
+  assigned to it in its own git worktree. Subdivide their tasks and spawn
+  native subagents for the pieces. Report a finished task to CAPO, not to
+  the root, as a fenced `# Result:` block naming its commit; CAPO re-checks
+  the commit against the task's declared write scope, merges what it
+  accepts, and runs the configured check command.
 - **Workers**: the platform's native subagents (Claude Code Agent tool, Codex
   subagents). They are not tracked as separate sessions by CAPO; their output
   comes back through their coordinator.
@@ -151,7 +177,7 @@ coordinators:
   - id: team-a
   - id: team-b
 
-tasks:             # optional; root decomposes the objective if empty
+tasks:             # at least one; each names its coordinator and write scope
   - id: component-a
     coordinator: team-a
     brief: ./tasks/component-a.md
@@ -217,8 +243,11 @@ every session file in the set.
 Rules:
 
 - Sessions write checkpoints on request from CAPO, not on their own schedule.
-- Work is committed to the task's worktree before the checkpoint is written, so
-  the checkpoint references commits, not dirty files.
+- Sessions are asked to commit their work before checkpointing. CAPO does not
+  rely on that alone: for a coordinator, it additionally reads the worktree
+  itself and records commits made since the run's base under "## Done" and
+  any paths still uncommitted under "## In progress", so a dirty worktree is
+  described in the checkpoint rather than lost.
 - A relaunched session receives its role instructions, the shared context, and
   its own checkpoint. It does not receive the previous platform's transcript.
 - Checkpoints are never overwritten. Each pause writes a new set under a

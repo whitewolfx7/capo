@@ -44,9 +44,14 @@ describe('renderEvent', () => {
       .toContain('no reset time reported');
   });
 
-  it('distinguishes a retryable error', () => {
-    expect(renderEvent({ kind: 'error', message: 'boom', retryable: true }))
-      .toContain('retryable');
+  it('renders a retryable error as a warning, not an error', () => {
+    expect(renderEvent({ kind: 'error', message: 'clamping hook timeout', retryable: true }))
+      .toBe('\n> _warning_: clamping hook timeout\n');
+  });
+
+  it('renders a non-retryable error as an error', () => {
+    expect(renderEvent({ kind: 'error', message: 'boom', retryable: false }))
+      .toBe('\n> **error**: boom\n');
   });
 
   it('covers every event kind without throwing', () => {

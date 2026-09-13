@@ -119,10 +119,16 @@ describe('loadConfig', () => {
     expect(cfg.limits.maxWorkersPerCoordinator).toBe(2);
   });
 
-  it('allows an empty task list', async () => {
+  it('rejects an empty task list', async () => {
     const p = await scaffold(VALID.slice(0, VALID.indexOf('tasks:')) +
       'tasks: []\nlimits:\n  max_workers_per_coordinator: 2\n');
-    const cfg = await loadConfig(p);
-    expect(cfg.tasks).toEqual([]);
+    await expect(loadConfig(p)).rejects.toThrow(/at least one task/);
+  });
+
+  it('parses setup_command as argv and defaults it to []', async () => {
+    const cfg = await loadConfig(await scaffold(VALID + 'setup_command: ["npm", "ci"]\n'));
+    expect(cfg.setupCommand).toEqual(['npm', 'ci']);
+    const cfg2 = await loadConfig(await scaffold(VALID));
+    expect(cfg2.setupCommand).toEqual([]);
   });
 });

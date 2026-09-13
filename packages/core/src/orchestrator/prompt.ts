@@ -4,7 +4,7 @@
  * session before a platform switch.
  */
 import { readFileSync } from 'node:fs';
-import type { CapoConfig, Checkpoint, PlatformId, RoleName, SessionId } from '../types.js';
+import type { CapoConfig, Checkpoint, PlatformId, RoleName, SessionId, TaskId } from '../types.js';
 import { renderCheckpoint } from '../checkpoint/render.js';
 import { RESULT_PROTOCOL } from './result.js';
 
@@ -31,6 +31,22 @@ export const CHECKPOINT_REQUEST = [
   'on the other platform sees only this checkpoint -- an empty "## Done" tells it that nothing',
   'has been done, and it will redo work you have already committed.',
 ].join('\n');
+
+/**
+ * How many times `#onEvent`'s `turn-end` handler will nudge a coordinator
+ * whose turn ended with an owned task still open before giving up and
+ * leaving it to the stall watchdog.
+ */
+export const MAX_RESULT_NUDGES = 3;
+
+/** Sent when a coordinator's turn ends with an owned task still open. */
+export function renderResultNudge(taskIds: TaskId[]): string {
+  return [
+    `CAPO: your turn ended but task(s) ${taskIds.join(', ')} are still open -- no \`# Result:\` block has been received.`,
+    'If the work is committed in your worktree, reply now with the fenced result block described under "Result protocol".',
+    'If you are blocked, state the blocker in one paragraph and stop. Do not start unrelated work.',
+  ].join('\n');
+}
 
 /**
  * Pulls the first fenced code block out of `text` whose first line starts

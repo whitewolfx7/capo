@@ -6,6 +6,7 @@ import { StateStore, runDir } from '@capo/core';
 import type { RunState } from '@capo/core';
 import { main } from './main.js';
 import type { Io } from './io.js';
+import { locateWorkspace } from './lib/run-locate.js';
 
 function capture(): { io: Io; out: string[]; err: string[] } {
   const out: string[] = [];
@@ -190,5 +191,86 @@ describe('capo status liveness', () => {
     const human = capture();
     await main(['status', '2026-09-12-004', '--workspace', dir], human.io);
     expect(human.out.join('\n')).not.toMatch(/no live orchestrator/i);
+  });
+});
+
+describe('capo switch / resume workspace location', () => {
+  let ws: string;
+
+  beforeEach(async () => {
+    ws = await mkdtemp(join(tmpdir(), 'capo-workspace-'));
+  });
+
+  afterEach(async () => {
+    await rm(ws, { recursive: true, force: true });
+  });
+
+  it('switch --workspace finds the run and refuses one that is already done', async () => {
+    const runId = '2026-09-13-001';
+    await StateStore.create(runDir(ws, runId), { ...baseState(runId), status: 'done' });
+
+    const { io, err } = capture();
+    const code = await main(['switch', runId, '--workspace', ws], io);
+    expect(code).toBe(1);
+    expect(err.join('\n')).toContain(`run ${runId} is already done; nothing to switch`);
+  });
+
+  it('switch refuses a failed run the same way', async () => {
+    const runId = '2026-09-13-002';
+    await StateStore.create(runDir(ws, runId), { ...baseState(runId), status: 'failed' });
+
+    const { io, err } = capture();
+    const code = await main(['switch', runId, '--workspace', ws], io);
+    expect(code).toBe(1);
+    expect(err.join('\n')).toContain(`run ${runId} is already failed; nothing to switch`);
+  });
+
+  it('switch with no --workspace walks up from a subdirectory to find the run', async () => {
+    const runId = '2026-09-13-003';
+    await StateStore.create(runDir(ws, runId), { ...baseState(runId), status: 'done' });
+
+    const sub = join(ws, 'src', 'deep');
+    await mkdir(sub, { recursive: true });
+    const originalCwd = process.cwd();
+    process.chdir(sub);
+    try {
+      const { io, err } = capture();
+      const code = await main(['switch', runId], io);
+      expect(code).toBe(1);
+      expect(err.join('\n')).toContain(`run ${runId} is already done; nothing to switch`);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('resume with no --workspace walks up from a subdirectory to find the run', async () => {
+    const runId = '2026-09-13-005';
+    // No pid file and no config.resolved.json: reopenRun will fail, but that
+    // failure must come from actually finding the run, not from failing to
+    // locate the workspace first.
+    await StateStore.create(runDir(ws, runId), baseState(runId));
+
+    const sub = join(ws, 'src', 'deep');
+    await mkdir(sub, { recursive: true });
+    const originalCwd = process.cwd();
+    process.chdir(sub);
+    try {
+      const { io, err } = capture();
+      const code = await main(['resume', runId], io);
+      expect(code).toBe(1);
+      expect(err.join('\n')).not.toMatch(/no run .* found at or above/);
+    } finally {
+      process.chdir(originalCwd);
+    }
+  });
+
+  it('locateWorkspace walks up from a subdirectory to the directory holding .capo/runs/<id>', async () => {
+    const runId = '2026-09-13-004';
+    await StateStore.create(runDir(ws, runId), baseState(runId));
+
+    const sub = join(ws, 'src', 'deep');
+    await mkdir(sub, { recursive: true });
+    expect(await locateWorkspace(sub, runId)).toBe(ws);
+    await expect(locateWorkspace(tmpdir(), 'nope')).rejects.toThrow(/no run/);
   });
 });

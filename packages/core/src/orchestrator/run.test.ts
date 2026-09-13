@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -8,8 +8,10 @@ import { StateStore, runDir } from '../state/store.js';
 import { latestCheckpointSet } from '../checkpoint/store.js';
 import { git, commitAll } from '../git/repo.js';
 import { FakeAdapter } from '../adapters/fake.js';
-import type { AdapterSession, Checkpoint, StartSessionOptions } from '../types.js';
+import { renderCheckpoint } from '../checkpoint/render.js';
+import type { AdapterEvent, AdapterSession, Checkpoint, StartSessionOptions } from '../types.js';
 import { Orchestrator } from './run.js';
+import { CHECKPOINT_REQUEST, MAX_RESULT_NUDGES } from './prompt.js';
 
 let dirs: string[] = [];
 
@@ -232,6 +234,16 @@ describe('Orchestrator', () => {
     expect(claude.started.map((s) => s.sessionId).sort()).toEqual(['root', 'team-a', 'team-b']);
     expect(claude.started.find((s) => s.sessionId === 'root')!.model).toBe('opus');
     expect(claude.started.find((s) => s.sessionId === 'team-a')!.model).toBe('sonnet');
+  });
+
+  it('launches the root supervised (read-only) and coordinators with the configured autonomy', async () => {
+    const { orch, claude } = await harness();
+    await orch.start();
+    const starts = claude.started;
+    const root = starts.find((s) => s.role === 'root');
+    const coord = starts.find((s) => s.role === 'coordinator');
+    expect(root?.autonomy).toBe('supervised');
+    expect(coord?.autonomy).toBe('autonomous');
   });
 
   it('on a usage-limit event, checkpoints every session and relaunches all of them on the other platform', async () => {
@@ -490,12 +502,18 @@ describe('checkpoint metadata is CAPO\'s, not the session\'s', () => {
   }
 
   it('overwrites blank or wrong metadata while keeping the narrative', async () => {
-    const { orch, claude, state, dir, config } = await harness(
+    const { orch, state, dir, config } = await harness(
       (id) => new LyingAdapter(id),
     );
     await orch.start();
-    claude.emit('root', { kind: 'usage-limit', raw: 'limit' });
-    await once(orch.events, 'switched');
+    // Migrated from a usage-limit trigger: a usage-limit pause no longer asks
+    // any session for a checkpoint at all (see the "checkpoint retry and
+    // usage-limit skip" describe block below), so it can no longer carry a
+    // session-written narrative to assert against. `user-switch` still
+    // requests a checkpoint from every live session, which is what this test
+    // is actually about: CAPO's own facts overwrite the session's claims,
+    // while the session's own narrative survives untouched.
+    await orch.requestSwitch('codex', 'user-switch');
 
     const set = (await latestCheckpointSet(dir))!;
     for (const cp of set.checkpoints) {
@@ -512,6 +530,170 @@ describe('checkpoint metadata is CAPO\'s, not the session\'s', () => {
     const root = set.checkpoints.find((c) => c.sessionId === 'root');
     expect(root?.role, 'role comes from CAPO, not the session').toBe('root');
     expect(config).toBeDefined();
+  });
+});
+
+describe('checkpoints that survive a real limit', () => {
+  /** A well-formed checkpoint reply, distinguishable from a synthesized one. */
+  function realCheckpoint(opts: StartSessionOptions, platform: string): Checkpoint {
+    return {
+      sessionId: opts.sessionId,
+      runId: 'test-run',
+      role: opts.role,
+      platform,
+      written: new Date().toISOString(),
+      baseCommit: 'deadbeef',
+      objective: `real objective for ${opts.sessionId}`,
+      decisions: [],
+      done: [],
+      inProgress: [],
+      remaining: [],
+      blockers: [],
+    };
+  }
+
+  function fenceCheckpoint(cp: Checkpoint): string {
+    return '```markdown\n' + renderCheckpoint(cp) + '\n```';
+  }
+
+  /**
+   * root and team-b answer the checkpoint request normally, on the first
+   * ask, exactly like `ArmedFakeAdapter`. team-a's first reply is only a
+   * `turn-end` -- standing in for the request landing mid-turn, with the
+   * model answering its own turn instead of the checkpoint -- and only its
+   * SECOND reply (after the orchestrator asks again at `turn-end`) is a real
+   * checkpoint.
+   */
+  class SlowToAnswerAdapter extends FakeAdapter {
+    #teamASends = 0;
+
+    override async start(opts: StartSessionOptions): Promise<AdapterSession> {
+      const session = await super.start(opts);
+      if (opts.sessionId !== 'team-a') {
+        this.replyWithCheckpoint(opts.sessionId, realCheckpoint(opts, this.id));
+        return session;
+      }
+
+      const adapter = this;
+      return {
+        ...session,
+        async send(text: string): Promise<void> {
+          adapter.sent.push({ sessionId: opts.sessionId, text });
+          adapter.#teamASends += 1;
+          if (adapter.#teamASends === 1) {
+            adapter.emit(opts.sessionId, { kind: 'turn-end' });
+            return;
+          }
+          adapter.emit(opts.sessionId, {
+            kind: 'text',
+            text: fenceCheckpoint(realCheckpoint(opts, adapter.id)),
+          });
+          adapter.emit(opts.sessionId, { kind: 'turn-end' });
+        },
+      };
+    }
+  }
+
+  it('re-sends the checkpoint request once at turn-end when the first went unanswered', async () => {
+    const { orch, claude, dir } = await harness((id) => new SlowToAnswerAdapter(id));
+    await orch.start();
+
+    await orch.requestSwitch('codex', 'user-switch');
+
+    const set = await latestCheckpointSet(dir);
+    const cp = set!.checkpoints.find((c) => c.sessionId === 'team-a')!;
+    expect(cp.objective).not.toMatch(/synthesized/);
+    const sendsToTeamA = claude.sent.filter((s) => s.sessionId === 'team-a').map((s) => s.text);
+    expect(sendsToTeamA.filter((t) => t === CHECKPOINT_REQUEST)).toHaveLength(2);
+  });
+
+  it('does not ask sessions on a capped platform for a checkpoint', async () => {
+    const { orch, claude, dir } = await harness();
+    await orch.start();
+
+    claude.emit('team-a', { kind: 'usage-limit', raw: 'limit', resetAt: future() });
+    await withDeadline(once(orch.events, 'switched'), 'switched');
+
+    const sendsTo = (sessionId: string): string[] =>
+      claude.sent.filter((s) => s.sessionId === sessionId).map((s) => s.text);
+    expect(sendsTo('team-a')).not.toContain(CHECKPOINT_REQUEST);
+    expect(sendsTo('root')).not.toContain(CHECKPOINT_REQUEST);
+
+    const set = await latestCheckpointSet(dir);
+    expect(set!.checkpoints.every((c) => c.objective.includes('synthesized'))).toBe(true);
+    expect(
+      set!.checkpoints.every((c) => c.blockers.some((b) => b === 'not asked: platform usage limit (pause reason: usage-limit)')),
+    ).toBe(true);
+  });
+
+  /**
+   * A session's queue can still hold buffered events after `close()`. This
+   * stands in for a real usage-limit that was already in flight on the old
+   * platform when a switch closed that session: `events()` keeps yielding
+   * the ordinary stream and then, 200ms after it ends -- comfortably after
+   * the switch this test triggers has completed -- one extra stale
+   * `usage-limit`, as if the old platform's process reported it late.
+   */
+  class LateLimitFakeAdapter extends FakeAdapter {
+    override async start(opts: StartSessionOptions): Promise<AdapterSession> {
+      const inner = await super.start(opts);
+      const late = { kind: 'usage-limit', raw: 'stale', resetAt: future() } as const;
+      return {
+        ...inner,
+        get platformSessionId() {
+          return inner.platformSessionId;
+        },
+        events(): AsyncIterable<AdapterEvent> {
+          const src = inner.events()[Symbol.asyncIterator]();
+          let sentLate = false;
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                async next() {
+                  const r = await src.next();
+                  if (!r.done || sentLate) return r;
+                  sentLate = true;
+                  await new Promise((res) => setTimeout(res, 200));
+                  return { value: late, done: false };
+                },
+              };
+            },
+          };
+        },
+      };
+    }
+  }
+
+  it('ignores a usage-limit that a closed session delivers after the switch has completed', async () => {
+    const { orch, claude, state } = await harness((id) =>
+      id === 'claude' ? new LateLimitFakeAdapter(id) : new ArmedFakeAdapter(id),
+    );
+    await orch.start();
+
+    claude.emit('team-a', { kind: 'usage-limit', raw: 'real', resetAt: future() });
+    await withDeadline(once(orch.events, 'switched'), 'switched');
+    await new Promise((r) => setTimeout(r, 500));
+
+    const s = state.get();
+    expect(s.activePlatform).toBe('codex');
+    expect(s.status).toBe('running');
+    expect(s.pauseCount).toBe(1);
+  });
+
+  it('augments a coordinator checkpoint with commits and dirty files from its worktree', async () => {
+    const { orch, state, dir } = await harness();
+    await orch.start();
+    const task = Object.values(state.get().tasks).find((t) => t.coordinator === 'team-a')!;
+
+    await writeFile(join(task.worktree!, 'a.txt'), 'content');
+    await commitAll(task.worktree!, 'fix: a', { name: 't', email: 't@t' });
+    await writeFile(join(task.worktree!, 'notes.txt'), 'wip');
+
+    await orch.requestSwitch('codex', 'user-switch');
+
+    const cp = (await latestCheckpointSet(dir))!.checkpoints.find((c) => c.sessionId === 'team-a')!;
+    expect(cp.done.some((d) => /^commit [0-9a-f]{7,} fix: a$/.test(d))).toBe(true);
+    expect(cp.inProgress.some((d) => d === 'uncommitted in worktree: notes.txt')).toBe(true);
   });
 });
 
@@ -636,6 +818,36 @@ describe('sessions run in their own worktree', () => {
   });
 });
 
+describe('setup_command', () => {
+  // A fresh git worktree has no node_modules, no build output -- nothing a
+  // real project needs to run its tests. setup_command runs once in every
+  // coordinator worktree right after it is created, so real work is
+  // possible before any session is ever launched into it.
+  it('runs setup_command in every coordinator worktree right after it is created', async () => {
+    const { orch, state } = await harness(
+      undefined,
+      {},
+      `\nsetup_command: ["node", "-e", "require('fs').writeFileSync('setup.marker', process.cwd())"]\n`,
+    );
+    await orch.start();
+    for (const task of Object.values(state.get().tasks)) {
+      // process.cwd() inside setup_command can resolve through a symlink
+      // (e.g. macOS's /tmp -> /private/tmp) even though task.worktree does
+      // not, so only the marker's existence is asserted, not its content.
+      await expect(readFile(join(task.worktree!, 'setup.marker'), 'utf8')).resolves.not.toBeNull();
+    }
+  });
+
+  it('rejects start() when setup_command fails', async () => {
+    const { orch } = await harness(
+      undefined,
+      {},
+      '\nsetup_command: ["node", "-e", "process.exit(3)"]\n',
+    );
+    await expect(orch.start()).rejects.toThrow(/setup_command failed/);
+  });
+});
+
 describe('task state machine', () => {
   it('moves a task from ready to running the moment its coordinator launches', async () => {
     const { orch, state } = await harness();
@@ -698,18 +910,97 @@ describe('result submission', () => {
     await orch.start();
     const task = Object.values(state.get().tasks)[0]!;
 
-    // Well-formed heading, everything else blank: parseResult must not throw,
-    // and the lenient read still moves the task to review -- acceptResult is
-    // what actually catches an unusable (empty) commit sha, at integration time.
-    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    // Well-formed heading, everything else blank: parseResult must not throw.
+    // The empty commit fails the git-sha check, so the result is ignored and
+    // the task stays running rather than moving to review.
     claude.emit(task.coordinator, { kind: 'text', text: '```markdown\n# Result: \ntask:\n```' });
-    await received;
-    expect(state.get().tasks[task.id]!.state).toBe('review');
+    await settle();
+    expect(state.get().tasks[task.id]!.state).toBe('running');
 
     // Plain prose with no fenced block at all must never be mistaken for a result.
     claude.emit(task.coordinator, { kind: 'text', text: 'still working on it' });
     await settle();
+    expect(state.get().tasks[task.id]!.state).toBe('running');
+
+    // The pump itself must still be alive after two ignored blocks: a
+    // well-formed result afterwards still lands normally.
+    const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit(task.coordinator, { kind: 'text', text: resultBlock(task.id, sha) });
+    await received;
     expect(state.get().tasks[task.id]!.state).toBe('review');
+  });
+
+  it('ignores a result block whose commit is not a git sha', async () => {
+    const { orch, claude, state } = await harness();
+    await orch.start();
+    const task = Object.values(state.get().tasks)[0]!;
+
+    // A coordinator that echoes the protocol template verbatim (placeholder
+    // and all) must never move its task to review -- Finding 8.
+    claude.emit(task.coordinator, {
+      kind: 'text',
+      text: resultBlock(task.id, '<the commit sha in your task worktree>', 'none'),
+    });
+    await settle();
+
+    expect(state.get().tasks[task.id]!.state).toBe('running');
+    expect(state.get().tasks[task.id]!.resultCommit).toBeUndefined();
+  });
+});
+
+describe('result nudges', () => {
+  it('nudges a coordinator whose turn ended with its task still running, at most MAX_RESULT_NUDGES times', async () => {
+    const { orch, claude, state } = await harness((id) => new FakeAdapter(id));
+    await orch.start();
+    const task = Object.values(state.get().tasks).find((t) => t.coordinator === 'team-a')!;
+
+    for (let i = 0; i < 5; i++) {
+      claude.emit('team-a', { kind: 'turn-end' });
+      await settle();
+    }
+
+    const sendsToTeamA = claude.sent.filter((s) => s.sessionId === 'team-a').map((s) => s.text);
+    const nudges = sendsToTeamA.filter((t) => t.startsWith('CAPO: your turn ended'));
+    expect(nudges).toHaveLength(MAX_RESULT_NUDGES);
+    expect(nudges[0]).toContain(task.id);
+  });
+
+  it('does not nudge once the task has reported a result', async () => {
+    const { orch, claude, state } = await harness((id) => new FakeAdapter(id));
+    await orch.start();
+    const task = Object.values(state.get().tasks).find((t) => t.coordinator === 'team-a')!;
+    const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit('team-a', { kind: 'text', text: resultBlock(task.id, sha) });
+    await received;
+
+    claude.emit('team-a', { kind: 'turn-end' });
+    await settle();
+
+    const nudges = claude.sent.filter((s) => s.sessionId === 'team-a' && s.text.startsWith('CAPO: your turn ended'));
+    expect(nudges).toHaveLength(0);
+  });
+
+  it('does not nudge the root, which never owns a task', async () => {
+    const { orch, claude } = await harness((id) => new FakeAdapter(id));
+    await orch.start();
+
+    claude.emit('root', { kind: 'turn-end' });
+    await settle();
+
+    expect(claude.sent.filter((s) => s.sessionId === 'root')).toHaveLength(0);
+  });
+
+  it('does not nudge while a switch is in flight', async () => {
+    const { orch, claude, codex } = await harness();
+    await orch.start();
+
+    await orch.requestSwitch('codex', 'user-switch');
+
+    const nudges = [...claude.sent, ...codex.sent].filter((s) => s.text.startsWith('CAPO: your turn ended'));
+    expect(nudges).toHaveLength(0);
   });
 });
 

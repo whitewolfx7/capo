@@ -8,6 +8,7 @@
  *   claude -p --output-format stream-json --input-format stream-json
  *          --verbose --session-id <uuid> --model <model>
  *          --append-system-prompt <text> --permission-mode <see permissionMode>
+ *          --setting-sources project,local
  *
  * Newline-delimited JSON in on stdin, newline-delimited JSON events out on
  * stdout. `readJsonLines` (the one piece of code this adapter shares with
@@ -62,6 +63,13 @@
  *    it: `--permission-mode acceptEdits` does NOT auto-approve Bash. It
  *    approved the `Write` this probe tried and the read-only commands, and
  *    the conclusion was over-generalised from that. See `permissionMode`.
+ *  - A live run showed sessions picking up this machine's user-scope
+ *    plugins, skills and hooks: the root loaded CAPO's own `capo:capo`
+ *    skill and ran `capo status` on its own run, and coordinators loaded
+ *    unrelated skills like `superpowers:systematic-debugging`, with ~37k
+ *    tokens of that system prompt repeated on every turn. `start()` now
+ *    passes `--setting-sources project,local` to drop user-scope settings
+ *    while still honoring a project's own configuration.
  */
 import { type ChildProcessWithoutNullStreams, execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -163,6 +171,15 @@ function resetsAtToIso(value: unknown): string | undefined {
 }
 
 /**
+ * "…usage limit reached|1757800000": the CLI's historical -p result text
+ * carries the reset as unix seconds after a pipe.
+ */
+function epochSuffixToIso(text: string): string | undefined {
+  const m = /\|(\d{9,11})\b/.exec(text);
+  return m ? resetsAtToIso(Number(m[1])) : undefined;
+}
+
+/**
  * Maps one parsed stdout line to zero or more adapter events. A line that
  * parses as JSON but doesn't match a known Claude Code message shape (an
  * unhandled `system` subtype, a stray banner) is dropped rather than
@@ -236,12 +253,19 @@ function mapLine(value: unknown): AdapterEvent[] {
 
   if (obj.type === 'result') {
     const events: AdapterEvent[] = [];
-    if (obj.is_error === true) {
-      const message =
-        typeof obj.result === 'string' && obj.result.length > 0
-          ? obj.result
-          : 'claude-code: turn ended with an error';
-      events.push({ kind: 'error', message, retryable: false });
+    const text = typeof obj.result === 'string' ? obj.result : '';
+    if (obj.is_error === true && USAGE_LIMIT_RE.test(text)) {
+      // The CLI's historical -p usage-limit phrasing can also arrive on an
+      // is_error result line rather than as assistant text or a structured
+      // rate_limit_event (see the header note on `rate_limit_event` above).
+      const resetAt = epochSuffixToIso(text) ?? extractResetAt(text);
+      events.push(resetAt !== undefined ? { kind: 'usage-limit', raw: text, resetAt } : { kind: 'usage-limit', raw: text });
+    } else if (obj.is_error === true) {
+      events.push({
+        kind: 'error',
+        message: text.length > 0 ? text : 'claude-code: turn ended with an error',
+        retryable: false,
+      });
     }
     events.push({ kind: 'turn-end' });
     return events;
@@ -333,6 +357,14 @@ export class ClaudeAdapter implements PlatformAdapter {
       opts.systemPrompt,
       '--permission-mode',
       permissionMode(opts.autonomy),
+      // User-scope settings are where installed plugins, their skills and
+      // hooks live. A live run showed the root loading CAPO's own plugin skill
+      // and driving `capo status` against its own run, and coordinators
+      // loading unrelated skills; each turn also carried ~37k tokens of that
+      // system prompt. Project and local settings still apply, so a project's
+      // own configuration is honored.
+      '--setting-sources',
+      'project,local',
     ];
 
     const child: ChildProcessWithoutNullStreams = spawn(this.executable, args, {
@@ -525,6 +557,15 @@ export class ClaudeAdapter implements PlatformAdapter {
  * worktree, and `autonomy: autonomous` is the setting whose whole meaning is
  * "act without asking". A user who does not want that has `supervised`,
  * which maps to `plan`: read and reason, write nothing.
+ *
+ * A live probe on Claude Code 2.1.236 (`claude -p --permission-mode plan
+ * --setting-sources project,local --output-format json`, instructed to use
+ * the Agent tool to spawn a subagent that writes a file) confirmed `plan`
+ * also confines a Task-tool subagent it might launch: run twice, the root
+ * never even reached the Agent call, replying instead that it had "drafted
+ * the plan" but "`ExitPlanMode` is disabled for this session" and it "can't
+ * proceed to actually spawn the agent or write the file without an explicit
+ * go-ahead" -- no `probe.txt` was created either time.
  *
  * Defaults to autonomous when unset, matching the config default.
  */

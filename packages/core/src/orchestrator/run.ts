@@ -4,9 +4,11 @@
  * relaunches it on the other platform. This is the state machine described
  * in docs/architecture.md, "The rule".
  */
+import { execFile as execFileCb } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { CapoError } from '../types.js';
 import type {
   AdapterEvent,
@@ -35,10 +37,12 @@ import {
   renderStallNotice,
 } from './transcript.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
-import { headCommit, addWorktree, assertAuthorIdentity } from '../git/repo.js';
-import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
+import { headCommit, addWorktree, assertAuthorIdentity, describeWorktree } from '../git/repo.js';
+import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint, MAX_RESULT_NUDGES, renderResultNudge } from './prompt.js';
 import { extractResult, parseResult } from './result.js';
 import { acceptResult, integrate, type IntegrationReport, type ResultSubmission } from '../integrate/merge.js';
+
+const execFile = promisify(execFileCb);
 
 const CHECKPOINT_TIMEOUT_MS = 60_000;
 
@@ -75,6 +79,13 @@ export class Orchestrator {
 
   readonly #live = new Map<SessionId, LiveSession>();
   readonly #pending = new Map<SessionId, (cp: Checkpoint) => void>();
+  // Sessions the orchestrator has already re-asked for a checkpoint once, at
+  // `turn-end`. See the `turn-end` case in `#onEvent`: a request injected
+  // mid-turn can be answered by the model finishing its own turn instead of
+  // replying to the request, so the request is sent again exactly once.
+  // `#requestCheckpoint`'s `finish` deletes a session's entry the moment its
+  // checkpoint is in hand, so a session that later pauses again starts clean.
+  readonly #checkpointResent = new Set<SessionId>();
 
   // Accepted-shape results, keyed by task id, kept in memory as they arrive
   // (see `#handleResult`). Rebuilt from `state.json` on construction so a
@@ -96,6 +107,12 @@ export class Orchestrator {
   readonly #stalledSet = new Set<SessionId>();
   readonly #stallPollMs: number;
   #stallTimer: NodeJS.Timeout | undefined;
+
+  // How many times each coordinator has been nudged (see the `turn-end` case
+  // in `#onEvent`) for turning without a result. Reset to 0 on every launch
+  // in `#launchOne`, and dropped wherever `#lastEventAt` is, so a session
+  // that relaunches -- after a switch, or a fresh run -- starts clean.
+  readonly #nudges = new Map<SessionId, number>();
 
   #switching = false;
 
@@ -167,6 +184,7 @@ export class Orchestrator {
       // and the orchestrator would die before launching anything.
       const branch = `capo/${this.#state.get().runId}/${coordinator.id}`;
       await addWorktree(this.#config.workspace, worktree, branch, base);
+      await this.#runSetup(worktree);
       worktrees.set(coordinator.id, { worktree, branch });
     }
 
@@ -276,6 +294,16 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * Resolves once every state write queued so far has landed on disk. Exit
+   * teardown (`blockUntilStopped`) awaits this before clearing the pid file,
+   * so a process that exits right after its last state update doesn't race
+   * its own write and leave a `state.json.<pid>.<n>.tmp` behind.
+   */
+  async flush(): Promise<void> {
+    await this.#state.flush();
+  }
+
   /** Checkpoints and closes every live session and ends the run. Does not relaunch. */
   async stop(reason: PauseReason = 'stop'): Promise<void> {
     if (this.#switching) return;
@@ -349,8 +377,15 @@ export class Orchestrator {
 
     await Promise.all(
       entries.map(async ([sessionId, live]) => {
-        const cp = await this.#requestCheckpoint(sessionId, live, reason);
-        results.set(sessionId, this.#stampCheckpoint(sessionId, live, cp));
+        // A session on a platform that just hit a real usage limit cannot
+        // answer at all: asking anyway either burns the request against a
+        // capped account or, worse, blocks the switch for the full
+        // CHECKPOINT_TIMEOUT_MS waiting on a reply that will never come.
+        const cp =
+          reason === 'usage-limit'
+            ? this.#synthesizeCheckpoint(sessionId, live, reason)
+            : await this.#requestCheckpoint(sessionId, live, reason);
+        results.set(sessionId, await this.#stampCheckpoint(sessionId, live, cp));
       }),
     );
 
@@ -371,6 +406,7 @@ export class Orchestrator {
     for (const [sessionId] of entries) {
       this.#live.delete(sessionId);
       this.#lastEventAt.delete(sessionId);
+      this.#nudges.delete(sessionId);
       this.#stalledSet.delete(sessionId);
     }
 
@@ -464,10 +500,19 @@ export class Orchestrator {
    * So the division is: the session supplies the narrative, which only it
    * knows, and CAPO supplies the facts, which only CAPO knows. Anything the
    * session says about identity is discarded rather than trusted.
+   *
+   * For a coordinator, CAPO also augments "## Done" and "## In progress"
+   * with what `describeWorktree` reads straight out of its git worktree:
+   * commits made since the run's base, and paths left uncommitted. A live
+   * switch produced an empty checkpoint because the request was injected
+   * mid-turn and the model answered its own turn instead -- but the
+   * coordinator's worktree still had the commit it made sitting right there.
+   * This is the part of a checkpoint a session cannot misreport, so it is
+   * never skipped, even when the session's own narrative came through fine.
    */
-  #stampCheckpoint(sessionId: SessionId, live: LiveSession, cp: Checkpoint): Checkpoint {
+  async #stampCheckpoint(sessionId: SessionId, live: LiveSession, cp: Checkpoint): Promise<Checkpoint> {
     const state = this.#state.get();
-    return {
+    const stamped: Checkpoint = {
       ...cp,
       sessionId,
       runId: state.runId,
@@ -476,6 +521,22 @@ export class Orchestrator {
       written: new Date().toISOString(),
       baseCommit: state.baseCommit,
     };
+    if (live.role !== 'coordinator') return stamped;
+
+    try {
+      const { commits, dirty } = await describeWorktree(this.#cwdFor('coordinator', sessionId), state.baseCommit);
+      for (const c of commits) {
+        const sha = c.split(' ')[0] ?? '';
+        if (!stamped.done.some((d) => d.includes(sha))) stamped.done.push(`commit ${c}`);
+      }
+      if (dirty.length > 0) {
+        const line = `uncommitted in worktree: ${dirty.join(', ')}`;
+        if (!stamped.inProgress.includes(line)) stamped.inProgress.unshift(line);
+      }
+    } catch (err) {
+      this.#log(`[${sessionId}] could not read worktree for checkpoint: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return stamped;
   }
 
   #requestCheckpoint(sessionId: SessionId, live: LiveSession, reason: PauseReason): Promise<Checkpoint> {
@@ -487,6 +548,7 @@ export class Orchestrator {
         settled = true;
         clearTimeout(timer);
         this.#pending.delete(sessionId);
+        this.#checkpointResent.delete(sessionId);
         resolve(cp);
       };
 
@@ -511,12 +573,19 @@ export class Orchestrator {
       platform: live.platform,
       written: new Date().toISOString(),
       baseCommit: state.baseCommit,
-      objective: '(synthesized: this session did not reply to the checkpoint request in time)',
+      objective:
+        reason === 'usage-limit'
+          ? '(synthesized: platform usage limit; the session could not be asked)'
+          : '(synthesized: this session did not reply to the checkpoint request in time)',
       decisions: [],
       done: [],
       inProgress: [],
       remaining: [],
-      blockers: [`no reply before the checkpoint timeout (pause reason: ${reason})`],
+      blockers: [
+        reason === 'usage-limit'
+          ? `not asked: platform usage limit (pause reason: ${reason})`
+          : `no reply before the checkpoint timeout (pause reason: ${reason})`,
+      ],
     };
   }
 
@@ -575,6 +644,27 @@ export class Orchestrator {
     return join(this.#runDir, 'worktrees', sessionId);
   }
 
+  /**
+   * Runs `config.setupCommand` once in a freshly created worktree, before
+   * anything else happens in it. A fresh git worktree has no node_modules,
+   * no build output -- nothing a real project needs to run its tests, so
+   * without this every coordinator (and later, `checkCommand`) starts from
+   * an environment that cannot actually work. No-op when unset.
+   */
+  async #runSetup(cwd: string): Promise<void> {
+    const [cmd, ...args] = this.#config.setupCommand;
+    if (cmd === undefined) return;
+    try {
+      await execFile(cmd, args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new CapoError(
+        `setup_command failed in ${cwd}: ${detail}`,
+        'fix setup_command in the config, or run it by hand in that worktree and resume',
+      );
+    }
+  }
+
   #cwdFor(role: RoleName, sessionId: SessionId): string {
     // Only the root runs in the shared workspace, and only because it does no
     // work there: it decomposes, judges and reports. Every coordinator is
@@ -621,7 +711,10 @@ export class Orchestrator {
       cwd: this.#cwdFor(role, sessionId),
       systemPrompt,
       prompt: checkpoint ? 'Resume your work from your checkpoint, above.' : 'Begin work toward the objective, above.',
-      autonomy: this.#config.autonomy,
+      // The root sits in the shared workspace. Twice now a live root has written
+      // there (once itself, once through spawned subagents) despite instructions
+      // not to. Instructions are not a boundary; a read-only launch is.
+      autonomy: role === 'root' ? 'supervised' : this.#config.autonomy,
     };
 
     if (this.#config.transcripts) {
@@ -641,6 +734,7 @@ export class Orchestrator {
     // "stalled" mark (or its last-event time) from the platform it just left.
     this.#lastEventAt.set(sessionId, Date.now());
     this.#stalledSet.delete(sessionId);
+    this.#nudges.set(sessionId, 0);
 
     await this.#update((draft) => {
       draft.sessions[sessionId] = {
@@ -670,6 +764,15 @@ export class Orchestrator {
   async #pump(sessionId: SessionId, platform: PlatformId, session: AdapterSession): Promise<void> {
     try {
       for await (const event of session.events()) {
+        if (this.#live.get(sessionId)?.session !== session) {
+          // A closed session draining its buffer. Keep it in the transcript for
+          // the record, but nothing it says can move the run any more.
+          if (this.#config.transcripts) {
+            const line = renderEvent(event);
+            if (line !== undefined) void appendTranscript(this.#runDir, sessionId, line);
+          }
+          continue;
+        }
         await this.#onEvent(sessionId, platform, event);
       }
     } catch (err) {
@@ -686,6 +789,7 @@ export class Orchestrator {
 
     this.#live.delete(sessionId);
     this.#lastEventAt.delete(sessionId);
+    this.#nudges.delete(sessionId);
     this.#stalledSet.delete(sessionId);
     // `#pump` is started with `void`, so nothing is awaiting it: an
     // exception escaping here is an unhandled rejection that takes the whole
@@ -799,6 +903,10 @@ export class Orchestrator {
       }
 
       case 'usage-limit': {
+        if (platform !== this.#state.get().activePlatform) {
+          this.#log(`[${sessionId}] usage-limit from ${platform}, which is no longer active; ignored`);
+          break;
+        }
         await this.#update((draft) => {
           draft.limits[platform] = {
             detectedAt: new Date().toISOString(),
@@ -811,6 +919,36 @@ export class Orchestrator {
       }
 
       case 'turn-end': {
+        const resolver = this.#pending.get(sessionId);
+        const live = this.#live.get(sessionId);
+        if (resolver && live && !this.#checkpointResent.has(sessionId)) {
+          // The first request was injected into a running turn and the model
+          // answered its own turn instead. Ask once more now that it is listening.
+          this.#checkpointResent.add(sessionId);
+          this.#log(`[${sessionId}] no checkpoint in its last turn; asking once more`);
+          live.session.send(CHECKPOINT_REQUEST).catch(() => {});
+        }
+
+        // A coordinator gets one turn to report a result; nothing else ever
+        // prompts it again if that turn ends without one. Nudge it, bounded,
+        // as long as it still owns open work -- skipped while a checkpoint
+        // is in flight for it (`resolver`), during a switch or integration
+        // (both close every live session shortly), for the root (which never
+        // owns a task), and for a session that is no longer live.
+        if (live && live.role === 'coordinator' && !resolver && !this.#switching && !this.#integrating) {
+          const open = Object.values(this.#state.get().tasks)
+            .filter((t) => t.coordinator === sessionId && t.state === 'running')
+            .map((t) => t.id);
+          const count = this.#nudges.get(sessionId) ?? 0;
+          if (open.length > 0 && count < MAX_RESULT_NUDGES) {
+            this.#nudges.set(sessionId, count + 1);
+            this.#log(`[${sessionId}] turn ended with ${open.join(', ')} still open; nudge ${count + 1}/${MAX_RESULT_NUDGES}`);
+            live.session.send(renderResultNudge(open)).catch(() => {});
+          } else if (open.length > 0 && count === MAX_RESULT_NUDGES) {
+            this.#nudges.set(sessionId, count + 1);
+            this.#log(`[${sessionId}] no result after ${MAX_RESULT_NUDGES} nudges; leaving it to the stall watchdog`);
+          }
+        }
         break;
       }
 
@@ -853,6 +991,15 @@ export class Orchestrator {
       raw = parseResult(block);
     } catch (err) {
       this.#log(`[${sessionId}] could not parse result: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    // A coordinator that echoes the protocol template verbatim (placeholder
+    // commit and all) must never move its task to review: the check runs
+    // before task resolution so a bogus commit is rejected regardless of
+    // which task it claims to be for.
+    if (!/^[0-9a-f]{7,40}$/i.test(raw.resultCommit)) {
+      this.#log(`[${sessionId}] result ignored: commit "${raw.resultCommit}" is not a git sha`);
       return;
     }
 
@@ -962,6 +1109,7 @@ export class Orchestrator {
         tasks,
         submissions: accepted,
         checkCommand: this.#config.checkCommand.length > 0 ? this.#config.checkCommand : undefined,
+        setupCommand: this.#config.setupCommand.length > 0 ? this.#config.setupCommand : undefined,
       });
     } catch (err) {
       // Integration never got far enough to judge any individual task, so
@@ -1032,6 +1180,7 @@ export class Orchestrator {
     for (const [sessionId] of liveEntries) {
       this.#live.delete(sessionId);
       this.#lastEventAt.delete(sessionId);
+      this.#nudges.delete(sessionId);
       this.#stalledSet.delete(sessionId);
     }
     this.#stopStallWatch();

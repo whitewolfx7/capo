@@ -31,7 +31,11 @@ limit path is exercised against captured fixtures, not a live cap. See
 2. Each role has a **model per platform**. Launching on a platform uses that
    platform's column.
 3. On a **usage limit**, every session checkpoints, all of them close, and the
-   team relaunches on the other platform. The root moves too.
+   team relaunches on the other platform. The root moves too. Checkpoints are
+   augmented with what CAPO can read itself: commits and uncommitted paths in
+   each coordinator's worktree. On a usage limit no session is asked; each
+   gets that mechanical checkpoint. On a hand-forced switch the session is
+   asked, and asked once more if its current turn ends without answering.
 4. When **both** platforms are capped, the run waits for the earliest known
    reset rather than flapping between them.
 5. `capo resume` continues from the latest checkpoint set on disk, so a crash
@@ -68,9 +72,10 @@ close the shell, which matters because the shell is often on the platform that
 is about to get capped.
 
 ```bash
-capo status                 # which platform, which sessions, which tasks
-capo switch <run-id>        # checkpoint and move now, before hitting a limit
-capo resume <run-id>        # continue from the latest checkpoint
+capo status                               # which platform, which sessions, which tasks
+capo switch <run-id> [--workspace <dir>]  # checkpoint and move now, before hitting a limit
+capo resume <run-id> [--workspace <dir>]  # continue from the latest checkpoint
+# from anywhere inside the project, or pass --workspace
 ```
 
 ## Configuration
@@ -108,7 +113,7 @@ coordinators:
   - id: team-a
   - id: team-b
 
-tasks:             # optional: leave empty and the root decomposes the objective
+tasks:             # at least one; each names its coordinator and write scope
   - id: component-a
     coordinator: team-a
     brief: ./tasks/component-a.md
@@ -117,6 +122,8 @@ tasks:             # optional: leave empty and the root decomposes the objective
     coordinator: team-b
     brief: ./tasks/component-b.md
     write_scope: [src/component-b/]
+
+setup_command: ["npm", "ci"]   # optional; runs in every fresh worktree
 
 transcripts: true  # default; writes a live log per session you can tail -f
 
@@ -219,6 +226,9 @@ is re-checked against that task's declared write scope (including files moved
 out of it by a rename), accepted results are merged one at a time into an
 integration worktree, and `check_command` runs over the combined tree. A
 rejected scope, a conflict, or a failing check fails that task and the run.
+If `setup_command` is set it runs in each coordinator worktree at creation
+and in the integration worktree before the check, because a fresh worktree
+has no installed dependencies.
 
 **A coordinator saying it finished does not make a task done.** Its report is
 a claim; the scope check and the merge are what settle it. The root does not
@@ -243,11 +253,20 @@ tests or `git commit`, which means it could never finish a task. A live run
 died on exactly that. On Codex it is `--approve-for-me`, which keeps the
 workspace-write sandbox.
 
-What bounds it is where sessions run. Every coordinator is confined to its
-own git worktree on its own branch, nothing merges into your tree until CAPO
-has re-checked the diff against that coordinator's declared write scope, and
-the root — the one session that does sit in your workspace — does no work
-there.
+Claude Code sessions are launched with `--setting-sources project,local`, so
+plugins, skills and hooks installed at user scope on your machine are not
+loaded into them. A live run showed a root session picking up CAPO's own
+plugin skill and treating itself as the control panel. Codex has no
+equivalent flag, so Codex sessions still see every plugin in
+`~/.codex/config.toml`; the root's read-only sandbox is what bounds it there.
+
+Be clear about what that grant is and is not. A git worktree bounds where
+*git-tracked changes* land; it does not bound what a process can do. A
+Claude Code session in this mode can run any command on your machine, and
+the Codex sandbox is the only OS-level boundary either platform offers.
+What CAPO adds on top: the root is launched read-only on both platforms,
+every coordinator runs in its own worktree, and nothing merges into your
+tree until CAPO has re-checked the diff against the declared write scope.
 
 Set `autonomy: supervised` for a dry run: sessions read and plan and write
 nothing. Because a headless run has nobody to answer an approval request, a
@@ -287,6 +306,9 @@ Also not done:
   stalls waiting for approval is only marked `stalled` (visible in `capo
   status`, `STATUS.md`, and its transcript); nothing lets a person answer it
   through CAPO. A live Codex coordinator hit exactly this and sat idle.
+- Codex sessions still load every plugin in `~/.codex/config.toml`; there is
+  no per-session isolation flag.
+- A coordinator that ignores three result nudges is only marked stalled.
 
 Found today, while running both adapters for real:
 

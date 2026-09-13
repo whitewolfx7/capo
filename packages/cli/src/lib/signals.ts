@@ -38,7 +38,14 @@ export function blockUntilStopped(orchestrator: Orchestrator, dir: string, log: 
       orchestrator.events.off('integration-finished', onIntegrationFinished);
       orchestrator.events.off('abandoned', onAbandoned);
       clearInterval(keepAlive);
-      void clearPidFile(dir).finally(resolve);
+      // Await every queued state write before clearing the pid file:
+      // clearing it first let teardown finish while a write was still
+      // in flight, leaving a `state.json.<pid>.<n>.tmp` behind on every run.
+      void orchestrator
+        .flush()
+        .catch(() => {})
+        .then(() => clearPidFile(dir))
+        .finally(resolve);
     };
 
     const onStopSignal = (): void => {

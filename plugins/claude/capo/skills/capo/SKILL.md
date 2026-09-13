@@ -68,11 +68,14 @@ node "${CLAUDE_PLUGIN_ROOT}/dist/capo.mjs" status 2026-09-12-001 --json
 ### `switch` — force a checkpoint and move a live run to another platform
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/dist/capo.mjs" switch <run-id> [--to <platform>]
+node "${CLAUDE_PLUGIN_ROOT}/dist/capo.mjs" switch <run-id> [--to <platform>] [--workspace <dir>]
 ```
 
 Requires a `<run-id>`. Omit `--to` to let CAPO pick the platform that is not
-currently active.
+currently active. Pass `--workspace` with the project directory the run was
+started in when this conversation's working directory is somewhere else;
+without it CAPO looks for `.capo/runs/<run-id>` in the current directory and
+its parents.
 
 **When the user says they are close to a usage limit, run `capo switch`
 proactively — do not wait for the platform to error.** A voluntary switch
@@ -91,12 +94,15 @@ node "${CLAUDE_PLUGIN_ROOT}/dist/capo.mjs" switch 2026-09-12-001 --to codex
 ### `resume` — continue a run from its latest checkpoint
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/dist/capo.mjs" resume <run-id>
+node "${CLAUDE_PLUGIN_ROOT}/dist/capo.mjs" resume <run-id> [--workspace <dir>]
 ```
 
 Requires a `<run-id>`. Use this after a run stopped (for example both
 platforms were capped and it went to `waiting`) to relaunch its sessions from
-the latest checkpoint set on disk.
+the latest checkpoint set on disk. Pass `--workspace` with the project
+directory the run was started in when this conversation's working directory
+is somewhere else; without it CAPO looks for `.capo/runs/<run-id>` in the
+current directory and its parents.
 
 Worked example:
 

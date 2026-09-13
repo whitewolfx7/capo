@@ -223,3 +223,15 @@ combined check is reported accurately rather than swallowed.
 - Registering the plugin with a host from the GitHub marketplace entry. A
   fresh `git clone` of the repository does run the committed bundle
   standalone with no install step, and `capo doctor` passes from it.
+
+## A switch under review, and what it changed
+
+Recorded 2026-09-13. Two more live runs of the fixture on Haiku, the second
+forced to Codex at 20 seconds. Both integrated 2/2. The second found: the
+relaunched root spawned two Codex subagents that committed both fixes to
+the workspace's `main`; one of three checkpoints was synthesized empty
+because the request landed mid-turn and the model answered with its result
+instead; the root loaded this machine's CAPO plugin skill and drove `capo
+status` against its own run. The root is now launched read-only, Claude
+sessions drop user-scope settings, checkpoints are re-asked once and
+augmented from git, and a limit-triggered pause asks nobody.

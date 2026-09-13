@@ -98,10 +98,17 @@ export async function integrate(opts: {
   tasks: TaskRecord[];
   submissions: Map<TaskId, ResultSubmission>;
   checkCommand?: string[];
+  /**
+   * Run once in the integration worktree, after all merges and before
+   * `checkCommand` -- e.g. `["npm", "ci"]`. A fresh worktree has no
+   * installed dependencies, so without this `checkCommand` has nothing to
+   * run against.
+   */
+  setupCommand?: string[];
   /** Omit in production so the user's own git identity and signing are used. */
   identity?: GitIdentity;
 }): Promise<IntegrationReport> {
-  const { repo, runDir, baseCommit, tasks, submissions, checkCommand, identity } = opts;
+  const { repo, runDir, baseCommit, tasks, submissions, checkCommand, setupCommand, identity } = opts;
   const worktree = join(runDir, 'integration');
   const branch = `capo/integration/${basename(runDir)}`;
 
@@ -145,6 +152,15 @@ export async function integrate(opts: {
 
   let checksPassed = true;
   let checkOutput = '';
+
+  if (setupCommand && setupCommand.length > 0) {
+    const [cmd, ...args] = setupCommand as [string, ...string[]];
+    try {
+      await execFile(cmd, args, { cwd: worktree, maxBuffer: MAX_BUFFER });
+    } catch (err) {
+      return { merged, conflicted, checksPassed: false, checkOutput: `setup_command failed:\n${execErrorOutput(err)}` };
+    }
+  }
 
   if (checkCommand && checkCommand.length > 0) {
     const [cmd, ...args] = checkCommand as [string, ...string[]];

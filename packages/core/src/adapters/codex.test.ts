@@ -21,20 +21,46 @@ describe('CodexAdapter argv', () => {
     const session = (await adapter.start({ ...opts0(), model: 'gpt-5-codex' })) as DebugSession;
 
     const argv = session.debugArgv[0]!;
-    expect(argv.slice(0, 4)).toEqual(['exec', '--json', '-m', 'gpt-5-codex']);
+    // Supervised is the default (unset autonomy), so --sandbox read-only
+    // lands right after exec, ahead of --json/-m (see autonomyFlags).
+    expect(argv.slice(0, 6)).toEqual(['exec', '--sandbox', 'read-only', '--json', '-m', 'gpt-5-codex']);
     // The last argument is the composed first turn: system prompt (if any)
     // then the first user instruction, because codex exec has no
     // --append-system-prompt and PROMPT is the only input channel.
-    expect(argv).toHaveLength(5);
-    expect(argv[4]).toContain('go');
+    expect(argv).toHaveLength(7);
+    expect(argv[6]).toContain('go');
 
     await session.close();
   });
 
-  it('adds no autonomy flag when autonomy is left unset (the "supervised" default)', async () => {
+  it('adds --sandbox read-only when autonomy is left unset (the "supervised" default)', async () => {
     const adapter = new CodexAdapter({ executable: process.execPath, extraArgs: [stub] });
     const session = (await adapter.start(opts0())) as DebugSession;
+    expect(session.debugArgv[0]).toEqual(expect.arrayContaining(['--sandbox', 'read-only']));
     expect(session.debugArgv[0]).not.toContain('--approve-for-me');
+    await session.close();
+  });
+
+  it('passes --sandbox read-only on every turn when supervised', async () => {
+    const adapter = new CodexAdapter({ executable: process.execPath, extraArgs: [stub] });
+    const session = (await adapter.start({ ...opts0(), autonomy: 'supervised' })) as DebugSession;
+
+    const iterator = session.events()[Symbol.asyncIterator]();
+    async function nextOfKind(kind: AdapterEvent['kind']): Promise<void> {
+      for (;;) {
+        const result = await iterator.next();
+        if (result.done) throw new Error(`stream ended before a "${kind}" event`);
+        if (result.value?.kind === kind) return;
+      }
+    }
+    await nextOfKind('turn-end');
+    await session.send('second turn');
+    await nextOfKind('turn-end');
+
+    expect(session.debugArgv[0]).toEqual(expect.arrayContaining(['--sandbox', 'read-only']));
+    expect(session.debugArgv[1]).toEqual(expect.arrayContaining(['--sandbox', 'read-only']));
+    expect(session.debugArgv[0]).not.toContain('--approve-for-me');
+
     await session.close();
   });
 
@@ -142,9 +168,13 @@ describe('CodexAdapter multi-turn resume', () => {
     expect(session.debugArgv).toHaveLength(2);
     expect(session.debugArgv[0]).not.toContain('resume');
     expect(session.debugArgv[1]?.[0]).toBe('exec');
-    expect(session.debugArgv[1]?.[1]).toBe('resume');
-    expect(session.debugArgv[1]?.[2]).toBe(sessionId);
-    expect(session.debugArgv[1]).toContain('--json');
+    // Autonomy flags (--sandbox read-only, by default) sit between "exec"
+    // and "resume"; find "resume" rather than assume a fixed index.
+    const resumeArgv = session.debugArgv[1]!;
+    const resumeIndex = resumeArgv.indexOf('resume');
+    expect(resumeIndex).toBeGreaterThan(0);
+    expect(resumeArgv[resumeIndex + 1]).toBe(sessionId);
+    expect(resumeArgv).toContain('--json');
 
     await session.close();
 

@@ -9,8 +9,13 @@ resting only on fake ones:
 
 - Config loading and validation, rejecting a bad setup before any model call.
 - The run directory, atomic state file, and the Markdown checkpoint format.
-- Git worktrees per task and write-scope enforcement including renames. A
-  coordinator runs inside its own worktree, whatever number of tasks it owns.
+- A git worktree and branch per coordinator, and write-scope enforcement
+  including renames. A coordinator runs inside its own worktree whatever
+  number of tasks it owns; only the root sits in the shared workspace, and
+  only because it does no work there. Where a coordinator owns several tasks
+  they share its worktree, so its results are checked against the union of
+  what that coordinator owns — the boundary strictly enforced is the one
+  between coordinators.
 - The result protocol and integration: a coordinator reports a finished task
   as a fenced `# Result:` block naming its commit, tasks move
   `ready` -> `running` -> `review` -> `done`/`failed`, and once every task has

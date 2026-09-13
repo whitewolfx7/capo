@@ -13,8 +13,9 @@ the entire team, root included, relaunches on the other platform from those
 checkpoints. Two subscriptions you already pay for, one continuous session of
 work.
 
-Status: v0.1. Full runs have finished end to end on **both** platforms
-against their real CLIs — two coordinators, each in its own worktree, fixing
+Status: v0.1.0. Full runs have finished end to end on **both** platforms
+against their real CLIs, and one has been switched from Claude to Codex
+mid-task and carried through to an integrated result on the other side — two coordinators, each in its own worktree, fixing
 their own bug, reporting results, and CAPO merging both, running the combined
 check, and exiting on its own. Every one of those runs found defects a green
 test suite could not see; they are written up in

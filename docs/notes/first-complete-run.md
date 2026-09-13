@@ -180,9 +180,20 @@ result on the other platform.
 
 The switch itself did what it claims: `pauses: 1`, checkpoint set `001`
 written for all three sessions, every session relaunched on Codex, and both
-coordinators' work survived. `add()` and `multiply()` were both fixed and
-both merged into the integration worktree, verified by reading the merged
-files rather than trusting the status.
+coordinators' work survived. The integration worktree carries one commit from
+each side of the switch:
+
+```
+ccfc40c Merge commit '9398727...' into capo/integration/2026-09-13-001
+83483cd Merge commit 'd561c0b...' into capo/integration/2026-09-13-001
+9398727 Fix component-b multiplication helper      <- written on Codex
+d561c0b Fix add() to sum instead of subtract       <- written on Claude
+2856210 fixture
+```
+
+Combined check 2/2, run `done`, exit 0. That is the whole premise working
+once, by hand: the team moved platforms mid-task and finished on the other
+side.
 
 Two things this found:
 

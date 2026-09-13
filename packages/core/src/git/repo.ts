@@ -149,3 +149,19 @@ export async function changedPaths(repo: string, base: string, head: string): Pr
   if (out.length === 0) return [];
   return out.split('\n').map(p => p.replace(/\\/g, '/'));
 }
+
+/**
+ * What a worktree has actually done since `base`: committed work and
+ * uncommitted paths. This is the part of a checkpoint a session cannot
+ * misreport, so CAPO reads it itself rather than asking.
+ */
+export async function describeWorktree(
+  worktree: string,
+  base: string,
+): Promise<{ commits: string[]; dirty: string[] }> {
+  const log = await git(worktree, ['log', '--reverse', '--format=%h %s', `${base}..HEAD`]);
+  const commits = log.length === 0 ? [] : log.split('\n');
+  const status = await git(worktree, ['status', '--porcelain']);
+  const dirty = status.length === 0 ? [] : status.split('\n').map((l) => l.slice(3).trim());
+  return { commits, dirty };
+}

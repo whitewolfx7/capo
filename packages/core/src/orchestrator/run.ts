@@ -35,7 +35,7 @@ import {
   renderStallNotice,
 } from './transcript.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
-import { headCommit, addWorktree, assertAuthorIdentity } from '../git/repo.js';
+import { headCommit, addWorktree, assertAuthorIdentity, describeWorktree } from '../git/repo.js';
 import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
 import { extractResult, parseResult } from './result.js';
 import { acceptResult, integrate, type IntegrationReport, type ResultSubmission } from '../integrate/merge.js';
@@ -75,6 +75,13 @@ export class Orchestrator {
 
   readonly #live = new Map<SessionId, LiveSession>();
   readonly #pending = new Map<SessionId, (cp: Checkpoint) => void>();
+  // Sessions the orchestrator has already re-asked for a checkpoint once, at
+  // `turn-end`. See the `turn-end` case in `#onEvent`: a request injected
+  // mid-turn can be answered by the model finishing its own turn instead of
+  // replying to the request, so the request is sent again exactly once.
+  // `#requestCheckpoint`'s `finish` deletes a session's entry the moment its
+  // checkpoint is in hand, so a session that later pauses again starts clean.
+  readonly #checkpointResent = new Set<SessionId>();
 
   // Accepted-shape results, keyed by task id, kept in memory as they arrive
   // (see `#handleResult`). Rebuilt from `state.json` on construction so a
@@ -349,8 +356,15 @@ export class Orchestrator {
 
     await Promise.all(
       entries.map(async ([sessionId, live]) => {
-        const cp = await this.#requestCheckpoint(sessionId, live, reason);
-        results.set(sessionId, this.#stampCheckpoint(sessionId, live, cp));
+        // A session on a platform that just hit a real usage limit cannot
+        // answer at all: asking anyway either burns the request against a
+        // capped account or, worse, blocks the switch for the full
+        // CHECKPOINT_TIMEOUT_MS waiting on a reply that will never come.
+        const cp =
+          reason === 'usage-limit'
+            ? this.#synthesizeCheckpoint(sessionId, live, reason)
+            : await this.#requestCheckpoint(sessionId, live, reason);
+        results.set(sessionId, await this.#stampCheckpoint(sessionId, live, cp));
       }),
     );
 
@@ -464,10 +478,19 @@ export class Orchestrator {
    * So the division is: the session supplies the narrative, which only it
    * knows, and CAPO supplies the facts, which only CAPO knows. Anything the
    * session says about identity is discarded rather than trusted.
+   *
+   * For a coordinator, CAPO also augments "## Done" and "## In progress"
+   * with what `describeWorktree` reads straight out of its git worktree:
+   * commits made since the run's base, and paths left uncommitted. A live
+   * switch produced an empty checkpoint because the request was injected
+   * mid-turn and the model answered its own turn instead -- but the
+   * coordinator's worktree still had the commit it made sitting right there.
+   * This is the part of a checkpoint a session cannot misreport, so it is
+   * never skipped, even when the session's own narrative came through fine.
    */
-  #stampCheckpoint(sessionId: SessionId, live: LiveSession, cp: Checkpoint): Checkpoint {
+  async #stampCheckpoint(sessionId: SessionId, live: LiveSession, cp: Checkpoint): Promise<Checkpoint> {
     const state = this.#state.get();
-    return {
+    const stamped: Checkpoint = {
       ...cp,
       sessionId,
       runId: state.runId,
@@ -476,6 +499,22 @@ export class Orchestrator {
       written: new Date().toISOString(),
       baseCommit: state.baseCommit,
     };
+    if (live.role !== 'coordinator') return stamped;
+
+    try {
+      const { commits, dirty } = await describeWorktree(this.#cwdFor('coordinator', sessionId), state.baseCommit);
+      for (const c of commits) {
+        const sha = c.split(' ')[0] ?? '';
+        if (!stamped.done.some((d) => d.includes(sha))) stamped.done.push(`commit ${c}`);
+      }
+      if (dirty.length > 0) {
+        const line = `uncommitted in worktree: ${dirty.join(', ')}`;
+        if (!stamped.inProgress.includes(line)) stamped.inProgress.unshift(line);
+      }
+    } catch (err) {
+      this.#log(`[${sessionId}] could not read worktree for checkpoint: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return stamped;
   }
 
   #requestCheckpoint(sessionId: SessionId, live: LiveSession, reason: PauseReason): Promise<Checkpoint> {
@@ -487,6 +526,7 @@ export class Orchestrator {
         settled = true;
         clearTimeout(timer);
         this.#pending.delete(sessionId);
+        this.#checkpointResent.delete(sessionId);
         resolve(cp);
       };
 
@@ -511,7 +551,10 @@ export class Orchestrator {
       platform: live.platform,
       written: new Date().toISOString(),
       baseCommit: state.baseCommit,
-      objective: '(synthesized: this session did not reply to the checkpoint request in time)',
+      objective:
+        reason === 'usage-limit'
+          ? '(synthesized: platform usage limit; the session could not be asked)'
+          : '(synthesized: this session did not reply to the checkpoint request in time)',
       decisions: [],
       done: [],
       inProgress: [],
@@ -814,6 +857,15 @@ export class Orchestrator {
       }
 
       case 'turn-end': {
+        const resolver = this.#pending.get(sessionId);
+        const live = this.#live.get(sessionId);
+        if (resolver && live && !this.#checkpointResent.has(sessionId)) {
+          // The first request was injected into a running turn and the model
+          // answered its own turn instead. Ask once more now that it is listening.
+          this.#checkpointResent.add(sessionId);
+          this.#log(`[${sessionId}] no checkpoint in its last turn; asking once more`);
+          live.session.send(CHECKPOINT_REQUEST).catch(() => {});
+        }
         break;
       }
 

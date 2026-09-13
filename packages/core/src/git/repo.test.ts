@@ -11,6 +11,7 @@ import {
   removeWorktree,
   commitAll,
   changedPaths,
+  describeWorktree,
 } from './repo.js';
 import { CapoError } from '../types.js';
 
@@ -204,6 +205,21 @@ describe('changedPaths', () => {
     const repo = await initRepo();
     const base = await commitFile(repo, 'a.txt', 'hello', 'initial commit');
     expect(await changedPaths(repo, base, base)).toEqual([]);
+    await rm(repo, { recursive: true, force: true });
+  });
+});
+
+describe('describeWorktree', () => {
+  it('describeWorktree lists commits since base and uncommitted paths', async () => {
+    const repo = await initRepo();
+    const baseSha = await commitFile(repo, 'a.txt', 'hello', 'initial commit');
+    await commitFile(repo, 'a.txt', 'changed', 'feat: one');
+    await writeFile(join(repo, 'b.txt'), 'uncommitted');
+
+    const out = await describeWorktree(repo, baseSha);
+    expect(out.commits).toHaveLength(1);
+    expect(out.commits[0]).toMatch(/^[0-9a-f]{7,} feat: one$/);
+    expect(out.dirty).toEqual(['b.txt']);
     await rm(repo, { recursive: true, force: true });
   });
 });

@@ -8,8 +8,10 @@ import { StateStore, runDir } from '../state/store.js';
 import { latestCheckpointSet } from '../checkpoint/store.js';
 import { git, commitAll } from '../git/repo.js';
 import { FakeAdapter } from '../adapters/fake.js';
+import { renderCheckpoint } from '../checkpoint/render.js';
 import type { AdapterSession, Checkpoint, StartSessionOptions } from '../types.js';
 import { Orchestrator } from './run.js';
+import { CHECKPOINT_REQUEST } from './prompt.js';
 
 let dirs: string[] = [];
 
@@ -500,12 +502,18 @@ describe('checkpoint metadata is CAPO\'s, not the session\'s', () => {
   }
 
   it('overwrites blank or wrong metadata while keeping the narrative', async () => {
-    const { orch, claude, state, dir, config } = await harness(
+    const { orch, state, dir, config } = await harness(
       (id) => new LyingAdapter(id),
     );
     await orch.start();
-    claude.emit('root', { kind: 'usage-limit', raw: 'limit' });
-    await once(orch.events, 'switched');
+    // Migrated from a usage-limit trigger: a usage-limit pause no longer asks
+    // any session for a checkpoint at all (see the "checkpoint retry and
+    // usage-limit skip" describe block below), so it can no longer carry a
+    // session-written narrative to assert against. `user-switch` still
+    // requests a checkpoint from every live session, which is what this test
+    // is actually about: CAPO's own facts overwrite the session's claims,
+    // while the session's own narrative survives untouched.
+    await orch.requestSwitch('codex', 'user-switch');
 
     const set = (await latestCheckpointSet(dir))!;
     for (const cp of set.checkpoints) {
@@ -522,6 +530,113 @@ describe('checkpoint metadata is CAPO\'s, not the session\'s', () => {
     const root = set.checkpoints.find((c) => c.sessionId === 'root');
     expect(root?.role, 'role comes from CAPO, not the session').toBe('root');
     expect(config).toBeDefined();
+  });
+});
+
+describe('checkpoints that survive a real limit', () => {
+  /** A well-formed checkpoint reply, distinguishable from a synthesized one. */
+  function realCheckpoint(opts: StartSessionOptions, platform: string): Checkpoint {
+    return {
+      sessionId: opts.sessionId,
+      runId: 'test-run',
+      role: opts.role,
+      platform,
+      written: new Date().toISOString(),
+      baseCommit: 'deadbeef',
+      objective: `real objective for ${opts.sessionId}`,
+      decisions: [],
+      done: [],
+      inProgress: [],
+      remaining: [],
+      blockers: [],
+    };
+  }
+
+  function fenceCheckpoint(cp: Checkpoint): string {
+    return '```markdown\n' + renderCheckpoint(cp) + '\n```';
+  }
+
+  /**
+   * root and team-b answer the checkpoint request normally, on the first
+   * ask, exactly like `ArmedFakeAdapter`. team-a's first reply is only a
+   * `turn-end` -- standing in for the request landing mid-turn, with the
+   * model answering its own turn instead of the checkpoint -- and only its
+   * SECOND reply (after the orchestrator asks again at `turn-end`) is a real
+   * checkpoint.
+   */
+  class SlowToAnswerAdapter extends FakeAdapter {
+    #teamASends = 0;
+
+    override async start(opts: StartSessionOptions): Promise<AdapterSession> {
+      const session = await super.start(opts);
+      if (opts.sessionId !== 'team-a') {
+        this.replyWithCheckpoint(opts.sessionId, realCheckpoint(opts, this.id));
+        return session;
+      }
+
+      const adapter = this;
+      return {
+        ...session,
+        async send(text: string): Promise<void> {
+          adapter.sent.push({ sessionId: opts.sessionId, text });
+          adapter.#teamASends += 1;
+          if (adapter.#teamASends === 1) {
+            adapter.emit(opts.sessionId, { kind: 'turn-end' });
+            return;
+          }
+          adapter.emit(opts.sessionId, {
+            kind: 'text',
+            text: fenceCheckpoint(realCheckpoint(opts, adapter.id)),
+          });
+          adapter.emit(opts.sessionId, { kind: 'turn-end' });
+        },
+      };
+    }
+  }
+
+  it('re-sends the checkpoint request once at turn-end when the first went unanswered', async () => {
+    const { orch, claude, dir } = await harness((id) => new SlowToAnswerAdapter(id));
+    await orch.start();
+
+    await orch.requestSwitch('codex', 'user-switch');
+
+    const set = await latestCheckpointSet(dir);
+    const cp = set!.checkpoints.find((c) => c.sessionId === 'team-a')!;
+    expect(cp.objective).not.toMatch(/synthesized/);
+    const sendsToTeamA = claude.sent.filter((s) => s.sessionId === 'team-a').map((s) => s.text);
+    expect(sendsToTeamA.filter((t) => t === CHECKPOINT_REQUEST)).toHaveLength(2);
+  });
+
+  it('does not ask sessions on a capped platform for a checkpoint', async () => {
+    const { orch, claude, dir } = await harness();
+    await orch.start();
+
+    claude.emit('team-a', { kind: 'usage-limit', raw: 'limit', resetAt: future() });
+    await withDeadline(once(orch.events, 'switched'), 'switched');
+
+    const sendsTo = (sessionId: string): string[] =>
+      claude.sent.filter((s) => s.sessionId === sessionId).map((s) => s.text);
+    expect(sendsTo('team-a')).not.toContain(CHECKPOINT_REQUEST);
+    expect(sendsTo('root')).not.toContain(CHECKPOINT_REQUEST);
+
+    const set = await latestCheckpointSet(dir);
+    expect(set!.checkpoints.every((c) => c.objective.includes('synthesized'))).toBe(true);
+  });
+
+  it('augments a coordinator checkpoint with commits and dirty files from its worktree', async () => {
+    const { orch, state, dir } = await harness();
+    await orch.start();
+    const task = Object.values(state.get().tasks).find((t) => t.coordinator === 'team-a')!;
+
+    await writeFile(join(task.worktree!, 'a.txt'), 'content');
+    await commitAll(task.worktree!, 'fix: a', { name: 't', email: 't@t' });
+    await writeFile(join(task.worktree!, 'notes.txt'), 'wip');
+
+    await orch.requestSwitch('codex', 'user-switch');
+
+    const cp = (await latestCheckpointSet(dir))!.checkpoints.find((c) => c.sessionId === 'team-a')!;
+    expect(cp.done.some((d) => /^commit [0-9a-f]{7,} fix: a$/.test(d))).toBe(true);
+    expect(cp.inProgress.some((d) => d === 'uncommitted in worktree: notes.txt')).toBe(true);
   });
 });
 

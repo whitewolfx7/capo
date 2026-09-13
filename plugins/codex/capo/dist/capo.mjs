@@ -29621,7 +29621,9 @@ var Orchestrator = class {
       done: [],
       inProgress: [],
       remaining: [],
-      blockers: [`no reply before the checkpoint timeout (pause reason: ${reason})`]
+      blockers: [
+        reason === "usage-limit" ? `not asked: platform usage limit (pause reason: ${reason})` : `no reply before the checkpoint timeout (pause reason: ${reason})`
+      ]
     };
   }
   /** Starts the root, then every coordinator, on `platform`. Each gets only its own checkpoint, if any. */
@@ -30227,7 +30229,12 @@ async function createRun(config2, startOn) {
 }
 async function reopenRun(dir) {
   const raw = await readFile6(join9(dir, "config.resolved.json"), "utf8");
-  const config2 = JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  const config2 = {
+    ...parsed,
+    setupCommand: parsed.setupCommand ?? [],
+    checkCommand: parsed.checkCommand ?? []
+  };
   const store = await StateStore.open(dir);
   const orchestrator = new Orchestrator({
     config: config2,

@@ -243,8 +243,11 @@ every session file in the set.
 Rules:
 
 - Sessions write checkpoints on request from CAPO, not on their own schedule.
-- Work is committed to the task's worktree before the checkpoint is written, so
-  the checkpoint references commits, not dirty files.
+- Sessions are asked to commit their work before checkpointing. CAPO does not
+  rely on that alone: for a coordinator, it additionally reads the worktree
+  itself and records commits made since the run's base under "## Done" and
+  any paths still uncommitted under "## In progress", so a dirty worktree is
+  described in the checkpoint rather than lost.
 - A relaunched session receives its role instructions, the shared context, and
   its own checkpoint. It does not receive the previous platform's transcript.
 - Checkpoints are never overwritten. Each pause writes a new set under a

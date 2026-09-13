@@ -8,6 +8,7 @@
  *   claude -p --output-format stream-json --input-format stream-json
  *          --verbose --session-id <uuid> --model <model>
  *          --append-system-prompt <text> --permission-mode <see permissionMode>
+ *          --setting-sources project,local
  *
  * Newline-delimited JSON in on stdin, newline-delimited JSON events out on
  * stdout. `readJsonLines` (the one piece of code this adapter shares with
@@ -556,6 +557,15 @@ export class ClaudeAdapter implements PlatformAdapter {
  * worktree, and `autonomy: autonomous` is the setting whose whole meaning is
  * "act without asking". A user who does not want that has `supervised`,
  * which maps to `plan`: read and reason, write nothing.
+ *
+ * A live probe on Claude Code 2.1.236 (`claude -p --permission-mode plan
+ * --setting-sources project,local --output-format json`, instructed to use
+ * the Agent tool to spawn a subagent that writes a file) confirmed `plan`
+ * also confines a Task-tool subagent it might launch: run twice, the root
+ * never even reached the Agent call, replying instead that it had "drafted
+ * the plan" but "`ExitPlanMode` is disabled for this session" and it "can't
+ * proceed to actually spawn the agent or write the file without an explicit
+ * go-ahead" -- no `probe.txt` was created either time.
  *
  * Defaults to autonomous when unset, matching the config default.
  */

@@ -581,7 +581,11 @@ export class Orchestrator {
       done: [],
       inProgress: [],
       remaining: [],
-      blockers: [`no reply before the checkpoint timeout (pause reason: ${reason})`],
+      blockers: [
+        reason === 'usage-limit'
+          ? `not asked: platform usage limit (pause reason: ${reason})`
+          : `no reply before the checkpoint timeout (pause reason: ${reason})`,
+      ],
     };
   }
 

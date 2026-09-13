@@ -621,6 +621,9 @@ describe('checkpoints that survive a real limit', () => {
 
     const set = await latestCheckpointSet(dir);
     expect(set!.checkpoints.every((c) => c.objective.includes('synthesized'))).toBe(true);
+    expect(
+      set!.checkpoints.every((c) => c.blockers.some((b) => b === 'not asked: platform usage limit (pause reason: usage-limit)')),
+    ).toBe(true);
   });
 
   /**

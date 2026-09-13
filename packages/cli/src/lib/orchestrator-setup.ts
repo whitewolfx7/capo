@@ -71,7 +71,18 @@ export async function createRun(config: CapoConfig, startOn: PlatformId | undefi
 /** Rebuilds an `Orchestrator` for an existing run directory, from its frozen resolved config. */
 export async function reopenRun(dir: string): Promise<{ orchestrator: Orchestrator; config: CapoConfig }> {
   const raw = await readFile(join(dir, 'config.resolved.json'), 'utf8');
-  const config = JSON.parse(raw) as CapoConfig;
+  const parsed = JSON.parse(raw) as CapoConfig;
+  // `config.resolved.json` is frozen at run-creation time and never
+  // rewritten, so a run recorded before a `CapoConfig` field existed has no
+  // key for it on disk. Both of these are read as `.length` by the
+  // orchestrator (setup and the combined check), so a plain `JSON.parse`
+  // leaves them `undefined` and that throws deep inside a resumed run.
+  // Default them here; keep whatever the file actually has otherwise.
+  const config: CapoConfig = {
+    ...parsed,
+    setupCommand: parsed.setupCommand ?? [],
+    checkCommand: parsed.checkCommand ?? [],
+  };
   const store = await StateStore.open(dir);
 
   const orchestrator = new Orchestrator({

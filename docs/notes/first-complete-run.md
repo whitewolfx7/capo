@@ -172,11 +172,43 @@ And the fix from the Codex run held: the root stayed out of the work. The
 workspace's `main` carried no commits from it, where the first finished run
 had two.
 
+## A run carried across a platform switch
+
+Recorded 2026-09-13. Started on Claude, switched to Codex once `team-a` had
+real committed work in its worktree, and carried through to an integrated
+result on the other platform.
+
+The switch itself did what it claims: `pauses: 1`, checkpoint set `001`
+written for all three sessions, every session relaunched on Codex, and both
+coordinators' work survived. `add()` and `multiply()` were both fixed and
+both merged into the integration worktree, verified by reading the merged
+files rather than trusting the status.
+
+Two things this found:
+
+**A checkpoint can silently under-report.** `team-a`'s checkpoint had
+`## Done: _none_` while describing, under `## Decisions made`, the commit it
+had already made. A session resuming on the other platform sees nothing but
+the checkpoint, so "Done: none" invites it to redo committed work. The
+checkpoint request now says explicitly that committed work belongs under
+`## Done`, and why.
+
+**The check-failure path ran live for the first time**, by accident: the
+fixture's `check_command` used `node --test <directory>`, which fails on Node
+23. CAPO handled it correctly — merged both results, ran the check, failed
+both tasks with the note "merged, but the combined check command failed",
+failed the run, and exited. The work itself was fine; the check command was
+wrong. Worth recording because it is the first evidence that a failing
+combined check is reported accurately rather than swallowed.
+
 ## Still unproven
 
-- A run that spans a platform switch mid-task, end to end.
 - A real usage limit firing. Every limit path is still exercised only against
-  captured fixtures.
+  captured fixtures, which is the one claim in the README nobody has watched
+  come true.
 - A merge conflict between two tasks. Config loading rejects overlapping
   write scopes, so the normal path cannot produce one; the conflict branch is
   covered only by `integrate/merge.test.ts` directly.
+- Registering the plugin with a host from the GitHub marketplace entry. A
+  fresh `git clone` of the repository does run the committed bundle
+  standalone with no install step, and `capo doctor` passes from it.

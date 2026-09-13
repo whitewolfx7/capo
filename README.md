@@ -274,11 +274,6 @@ CLI output shapes, never against a live cap. This is the one remaining claim
 in this README that has not been watched happen, and it is the reason CAPO
 exists.
 
-**A platform switch mid-task has not been run end to end.** A switch has been
-driven by hand on a live run and the checkpoints round-tripped, but no run
-has yet been switched mid-task and then carried through to a finished,
-integrated result on the other platform.
-
 Also not done:
 
 - Moving a single task between platforms while the rest of the team keeps
@@ -300,9 +295,10 @@ Found today, while running both adapters for real:
   choice is a request CAPO cannot enforce. A live Codex coordinator did
   delegate to a real worker and check its commit before reporting, so the
   path works — but nothing verifies which model the worker actually ran as.
-- Installing straight from GitHub with no local clone should work now that
-  the built plugin bundles are committed to the repository instead of
-  gitignored, but nobody has run that path end to end yet.
+- Registering the plugin with a host from the GitHub marketplace entry has
+  not been run end to end. A fresh `git clone` of this repository does run
+  the committed bundle with no install step, and `capo doctor` passes from
+  it, so the payload is right; what is untested is the host's own install.
 
 **Not yet verified:** no real usage limit has fired on either platform.
 Claude Code's detection was rewritten today to read the CLI's own structured

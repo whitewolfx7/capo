@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildSystemPrompt } from './prompt.js';
+import { buildSystemPrompt, CHECKPOINT_REQUEST } from './prompt.js';
 import type { CapoConfig, Checkpoint } from '../types.js';
 
 let dir: string;
@@ -154,5 +154,24 @@ describe('buildSystemPrompt result protocol', () => {
       contextFiles: [], roleInstructions: 'Own the table.',
     });
     expect(md).not.toContain('# Result: <task id>');
+  });
+});
+
+describe('CHECKPOINT_REQUEST', () => {
+  // A real switch produced a checkpoint whose "## Done" said "_none_" while
+  // the same session described, under "## Decisions made", a fix it had
+  // already committed. The session resuming on the other platform sees only
+  // the checkpoint, so "Done: none" invites it to redo committed work.
+  it('tells the session that committed work belongs under Done', () => {
+    expect(CHECKPOINT_REQUEST).toMatch(/## Done/);
+    expect(CHECKPOINT_REQUEST).toMatch(/commit/i);
+  });
+
+  it('says why: the next session sees nothing but this', () => {
+    expect(CHECKPOINT_REQUEST).toMatch(/redo|only this checkpoint|sees only/i);
+  });
+
+  it('is included in what a session is actually told', () => {
+    expect(build()).toContain(CHECKPOINT_REQUEST);
   });
 });

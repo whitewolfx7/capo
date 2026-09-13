@@ -20,6 +20,16 @@ export const CHECKPOINT_REQUEST = [
   'in the documented checkpoint format, whose first line is exactly:',
   '# Checkpoint: <your own session id>',
   'Do not write anything before or after the fenced block.',
+  '',
+  // A live switch produced a checkpoint whose "## Done" said "_none_" while
+  // the same session described a commit it had already made under
+  // "## Decisions made". The session that reads this on the other platform
+  // has nothing but these sections: "Done: none" tells it to start over on
+  // work that is already committed.
+  'Put every commit you have already made under "## Done", with its sha and what it changed,',
+  'even if you described it elsewhere in this conversation. The session that picks this run up',
+  'on the other platform sees only this checkpoint -- an empty "## Done" tells it that nothing',
+  'has been done, and it will redo work you have already committed.',
 ].join('\n');
 
 /**

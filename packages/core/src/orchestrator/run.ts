@@ -36,7 +36,7 @@ import {
 } from './transcript.js';
 import { parseCheckpoint } from '../checkpoint/render.js';
 import { headCommit, addWorktree, assertAuthorIdentity, describeWorktree } from '../git/repo.js';
-import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint } from './prompt.js';
+import { buildSystemPrompt, CHECKPOINT_REQUEST, extractCheckpoint, MAX_RESULT_NUDGES, renderResultNudge } from './prompt.js';
 import { extractResult, parseResult } from './result.js';
 import { acceptResult, integrate, type IntegrationReport, type ResultSubmission } from '../integrate/merge.js';
 
@@ -103,6 +103,12 @@ export class Orchestrator {
   readonly #stalledSet = new Set<SessionId>();
   readonly #stallPollMs: number;
   #stallTimer: NodeJS.Timeout | undefined;
+
+  // How many times each coordinator has been nudged (see the `turn-end` case
+  // in `#onEvent`) for turning without a result. Reset to 0 on every launch
+  // in `#launchOne`, and dropped wherever `#lastEventAt` is, so a session
+  // that relaunches -- after a switch, or a fresh run -- starts clean.
+  readonly #nudges = new Map<SessionId, number>();
 
   #switching = false;
 
@@ -385,6 +391,7 @@ export class Orchestrator {
     for (const [sessionId] of entries) {
       this.#live.delete(sessionId);
       this.#lastEventAt.delete(sessionId);
+      this.#nudges.delete(sessionId);
       this.#stalledSet.delete(sessionId);
     }
 
@@ -687,6 +694,7 @@ export class Orchestrator {
     // "stalled" mark (or its last-event time) from the platform it just left.
     this.#lastEventAt.set(sessionId, Date.now());
     this.#stalledSet.delete(sessionId);
+    this.#nudges.set(sessionId, 0);
 
     await this.#update((draft) => {
       draft.sessions[sessionId] = {
@@ -732,6 +740,7 @@ export class Orchestrator {
 
     this.#live.delete(sessionId);
     this.#lastEventAt.delete(sessionId);
+    this.#nudges.delete(sessionId);
     this.#stalledSet.delete(sessionId);
     // `#pump` is started with `void`, so nothing is awaiting it: an
     // exception escaping here is an unhandled rejection that takes the whole
@@ -865,6 +874,27 @@ export class Orchestrator {
           this.#checkpointResent.add(sessionId);
           this.#log(`[${sessionId}] no checkpoint in its last turn; asking once more`);
           live.session.send(CHECKPOINT_REQUEST).catch(() => {});
+        }
+
+        // A coordinator gets one turn to report a result; nothing else ever
+        // prompts it again if that turn ends without one. Nudge it, bounded,
+        // as long as it still owns open work -- skipped while a checkpoint
+        // is in flight for it (`resolver`), during a switch or integration
+        // (both close every live session shortly), for the root (which never
+        // owns a task), and for a session that is no longer live.
+        if (live && live.role === 'coordinator' && !resolver && !this.#switching && !this.#integrating) {
+          const open = Object.values(this.#state.get().tasks)
+            .filter((t) => t.coordinator === sessionId && t.state === 'running')
+            .map((t) => t.id);
+          const count = this.#nudges.get(sessionId) ?? 0;
+          if (open.length > 0 && count < MAX_RESULT_NUDGES) {
+            this.#nudges.set(sessionId, count + 1);
+            this.#log(`[${sessionId}] turn ended with ${open.join(', ')} still open; nudge ${count + 1}/${MAX_RESULT_NUDGES}`);
+            live.session.send(renderResultNudge(open)).catch(() => {});
+          } else if (open.length > 0 && count === MAX_RESULT_NUDGES) {
+            this.#nudges.set(sessionId, count + 1);
+            this.#log(`[${sessionId}] no result after ${MAX_RESULT_NUDGES} nudges; leaving it to the stall watchdog`);
+          }
         }
         break;
       }
@@ -1087,6 +1117,7 @@ export class Orchestrator {
     for (const [sessionId] of liveEntries) {
       this.#live.delete(sessionId);
       this.#lastEventAt.delete(sessionId);
+      this.#nudges.delete(sessionId);
       this.#stalledSet.delete(sessionId);
     }
     this.#stopStallWatch();

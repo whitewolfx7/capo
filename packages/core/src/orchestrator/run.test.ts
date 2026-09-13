@@ -11,7 +11,7 @@ import { FakeAdapter } from '../adapters/fake.js';
 import { renderCheckpoint } from '../checkpoint/render.js';
 import type { AdapterSession, Checkpoint, StartSessionOptions } from '../types.js';
 import { Orchestrator } from './run.js';
-import { CHECKPOINT_REQUEST } from './prompt.js';
+import { CHECKPOINT_REQUEST, MAX_RESULT_NUDGES } from './prompt.js';
 
 let dirs: string[] = [];
 
@@ -835,6 +835,61 @@ describe('result submission', () => {
     claude.emit(task.coordinator, { kind: 'text', text: 'still working on it' });
     await settle();
     expect(state.get().tasks[task.id]!.state).toBe('review');
+  });
+});
+
+describe('result nudges', () => {
+  it('nudges a coordinator whose turn ended with its task still running, at most MAX_RESULT_NUDGES times', async () => {
+    const { orch, claude, state } = await harness((id) => new FakeAdapter(id));
+    await orch.start();
+    const task = Object.values(state.get().tasks).find((t) => t.coordinator === 'team-a')!;
+
+    for (let i = 0; i < 5; i++) {
+      claude.emit('team-a', { kind: 'turn-end' });
+      await settle();
+    }
+
+    const sendsToTeamA = claude.sent.filter((s) => s.sessionId === 'team-a').map((s) => s.text);
+    const nudges = sendsToTeamA.filter((t) => t.startsWith('CAPO: your turn ended'));
+    expect(nudges).toHaveLength(MAX_RESULT_NUDGES);
+    expect(nudges[0]).toContain(task.id);
+  });
+
+  it('does not nudge once the task has reported a result', async () => {
+    const { orch, claude, state } = await harness((id) => new FakeAdapter(id));
+    await orch.start();
+    const task = Object.values(state.get().tasks).find((t) => t.coordinator === 'team-a')!;
+    const sha = await commitInWorktree(task.worktree!, inScopeFile(task), 'done\n');
+
+    const received = withDeadline(once(orch.events, 'result-received'), 'result-received');
+    claude.emit('team-a', { kind: 'text', text: resultBlock(task.id, sha) });
+    await received;
+
+    claude.emit('team-a', { kind: 'turn-end' });
+    await settle();
+
+    const nudges = claude.sent.filter((s) => s.sessionId === 'team-a' && s.text.startsWith('CAPO: your turn ended'));
+    expect(nudges).toHaveLength(0);
+  });
+
+  it('does not nudge the root, which never owns a task', async () => {
+    const { orch, claude } = await harness((id) => new FakeAdapter(id));
+    await orch.start();
+
+    claude.emit('root', { kind: 'turn-end' });
+    await settle();
+
+    expect(claude.sent.filter((s) => s.sessionId === 'root')).toHaveLength(0);
+  });
+
+  it('does not nudge while a switch is in flight', async () => {
+    const { orch, claude, codex } = await harness();
+    await orch.start();
+
+    await orch.requestSwitch('codex', 'user-switch');
+
+    const nudges = [...claude.sent, ...codex.sent].filter((s) => s.text.startsWith('CAPO: your turn ended'));
+    expect(nudges).toHaveLength(0);
   });
 });
 
